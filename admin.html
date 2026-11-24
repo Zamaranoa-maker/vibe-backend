@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VIBE Admin</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Cairo',sans-serif;background:#0b0b14;color:#fff;padding:24px}
+    h1{color:#25e5ff;margin-bottom:6px}
+    .sub{color:#8fa6d8;font-size:13px;margin-bottom:24px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+    .card{background:#151524;border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:18px}
+    .card span{font-size:12px;color:#8fa6d8;display:block;margin-bottom:6px}
+    .card b{font-size:28px;color:#ffd166}
+    .card.profit b{color:#4dffb0}
+    .card.loss b{color:#ff6b6b}
+    h2{color:#fff;margin:20px 0 12px;font-size:20px}
+    table{width:100%;border-collapse:collapse;background:#151524;border-radius:14px;overflow:hidden}
+    th,td{padding:10px 14px;text-align:right;border-bottom:1px solid rgba(255,255,255,.07);font-size:13px}
+    th{color:#8fa6d8;background:#1b1b2e}
+    .note{background:#1a1a2e;border-right:3px solid #ffd166;border-radius:8px;padding:14px;font-size:13px;line-height:1.8;color:#cbb992;margin:20px 0}
+    button{background:linear-gradient(90deg,#25e5ff,#1e7bff);border:none;border-radius:10px;padding:10px 18px;font-family:inherit;font-weight:900;color:#04121f;cursor:pointer;margin-top:10px}
+    input{background:#222;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:8px;color:#fff;font-family:inherit;width:100px}
+  </style>
+</head>
+<body>
+  <h1>📊 VIBE — لوحة التحكم</h1>
+  <div class="sub">إحصائيات مباشرة من السيرفر</div>
+
+  <div class="grid" id="cards"></div>
+
+  <h2>⚙️ إعدادات المكافآت</h2>
+  <table>
+    <tr><th>الإعداد</th><th>القيمة</th></tr>
+    <tr><td>مكافأة المشاهدة</td><td><input id="c_rewardView"></td></tr>
+    <tr><td>مكافأة الرفع</td><td><input id="c_rewardUpload"></td></tr>
+    <tr><td>مكافأة الإعجاب</td><td><input id="c_rewardLike"></td></tr>
+    <tr><td>مكافأة اليومية</td><td><input id="c_rewardDaily"></td></tr>
+    <tr><td>دخل الإعلان/مشاهدة</td><td><input id="c_adRevenuePerView"></td></tr>
+    <tr><td>حد أقصى يومي/مستخدم</td><td><input id="c_maxDailyEarnPerUser"></td></tr>
+  </table>
+  <button onclick="saveConfig()">💾 حفظ الإعدادات</button>
+
+  <div class="note">
+    💡 <b>معادلة الربح</b>: الدخل = عدد الإعلانات × دخل الإعلان. المصروف = مكافآت المستخدمين.<br>
+    لو المصروف أكبر من الدخل → غيّر الإعدادات هنا فوراً (قلّل المكافآت أو زوّد دخل الإعلان المفترض).<br>
+    الأرقام دي <b>محاكاة محلية</b> — عشان فلوس حقيقية لازم تربط AdMob ومنصة دفع فعليتين.
+  </div>
+
+  <script>
+    async function load(){
+      const r=await fetch('/api/admin/stats').then(r=>r.json());
+      const c=r.config;
+      const profit=r.profit;
+      document.getElementById('cards').innerHTML=`
+        <div class="card"><span>المستخدمين</span><b>${r.users}</b></div>
+        <div class="card"><span>الفيديوهات</span><b>${r.videos}</b></div>
+        <div class="card"><span>مشاهدات/إعلانات</span><b>${r.stats.adImpressions}</b></div>
+        <div class="card"><span>الدخل المقدّر</span><b>${r.revenueEstimate} ج.م</b></div>
+        <div class="card"><span>المصروف</span><b>${r.spent} ج.م</b></div>
+        <div class="card ${profit>=0?'profit':'loss'}"><span>الصافي</span><b>${profit} ج.م</b></div>`;
+      ['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>{
+        document.getElementById('c_'+k).value=c[k];
+      });
+    }
+    async function saveConfig(){
+      const b={};
+      ['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>{
+        b[k]=parseFloat(document.getElementById('c_'+k).value);
+      });
+      await fetch('/api/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+      load();alert('تم الحفظ ✅');
+    }
+    load();setInterval(load,5000);
+  </script>
+</body>
+</html>
