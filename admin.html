@@ -1,78 +1,150 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VIBE Admin</title>
-  <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:'Cairo',sans-serif;background:#0b0b14;color:#fff;padding:24px}
-    h1{color:#25e5ff;margin-bottom:6px}
-    .sub{color:#8fa6d8;font-size:13px;margin-bottom:24px}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
-    .card{background:#151524;border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:18px}
-    .card span{font-size:12px;color:#8fa6d8;display:block;margin-bottom:6px}
-    .card b{font-size:28px;color:#ffd166}
-    .card.profit b{color:#4dffb0}
-    .card.loss b{color:#ff6b6b}
-    h2{color:#fff;margin:20px 0 12px;font-size:20px}
-    table{width:100%;border-collapse:collapse;background:#151524;border-radius:14px;overflow:hidden}
-    th,td{padding:10px 14px;text-align:right;border-bottom:1px solid rgba(255,255,255,.07);font-size:13px}
-    th{color:#8fa6d8;background:#1b1b2e}
-    .note{background:#1a1a2e;border-right:3px solid #ffd166;border-radius:8px;padding:14px;font-size:13px;line-height:1.8;color:#cbb992;margin:20px 0}
-    button{background:linear-gradient(90deg,#25e5ff,#1e7bff);border:none;border-radius:10px;padding:10px 18px;font-family:inherit;font-weight:900;color:#04121f;cursor:pointer;margin-top:10px}
-    input{background:#222;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:8px;color:#fff;font-family:inherit;width:100px}
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VIBE Control Center 🎛️</title>
+<style>
+:root{--bg:#08080f;--card:#12121f;--line:rgba(255,255,255,.08);--cyan:#25e5ff;--pink:#ff2d6f;--gold:#ffd166;--green:#4dffb0;--red:#ff6b6b}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Cairo',sans-serif;background:var(--bg);color:#fff;min-height:100vh;padding:20px;background-image:radial-gradient(ellipse at 15% 0%,rgba(37,229,255,.08),transparent 40%),radial-gradient(ellipse at 85% 100%,rgba(255,45,111,.08),transparent 40%)}
+.wrap{max-width:1200px;margin:0 auto}
+.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap;gap:12px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,var(--cyan),var(--pink));display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 0 30px rgba(37,229,255,.3)}
+.brand h1{font-size:22px;background:linear-gradient(90deg,#fff,var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand p{font-size:11px;color:#8fa6d8}
+.live{display:flex;align-items:center;gap:7px;background:rgba(77,255,176,.1);border:1px solid rgba(77,255,176,.3);border-radius:20px;padding:7px 14px;font-size:12px;color:var(--green)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite}
+@keyframes pulse{50%{opacity:.3;transform:scale(.7)}}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px}
+.kpi{background:linear-gradient(160deg,var(--card),#0d0d18);border:1px solid var(--line);border-radius:18px;padding:18px;position:relative;overflow:hidden;transition:transform .2s}
+.kpi:hover{transform:translateY(-3px)}
+.kpi::after{content:'';position:absolute;top:-30px;left:-30px;width:100px;height:100px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.05),transparent 70%)}
+.kpi .ic{font-size:22px;margin-bottom:8px;display:block}
+.kpi .lb{font-size:11px;color:#8fa6d8;margin-bottom:4px}
+.kpi .vl{font-size:30px;font-weight:900;line-height:1.1}
+.kpi.c1 .vl{color:var(--cyan)}.kpi.c2 .vl{color:var(--pink)}.kpi.c3 .vl{color:var(--gold)}.kpi.c4 .vl{color:var(--green)}.kpi.c5 .vl{color:#b06bff}
+.trend{font-size:10px;margin-top:6px;color:var(--green)}
+.panels{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px}
+@media(max-width:800px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px}
+.panel h2{font-size:15px;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.panel h2 .b{width:6px;height:16px;border-radius:3px;background:var(--cyan)}
+canvas{width:100%;height:180px}
+.log{display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto}
+.li{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:10px;background:rgba(255,255,255,.03);font-size:12px;animation:slide .3s}
+@keyframes slide{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
+.li .ti{font-size:16px}.li .tx{flex:1;color:#cbd5e8}.li .tm{color:#6b7a9c;font-size:10px}.li .am{color:var(--green);font-weight:900}
+.cfg table{width:100%;border-collapse:collapse;font-size:12px}
+.cfg th,.cfg td{padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
+.cfg th{color:#8fa6d8;font-weight:400}
+.cfg input{width:70px;background:#1c1c2c;border:1px solid var(--line);border-radius:7px;padding:5px 7px;color:var(--gold);font-family:inherit;text-align:center}
+.btn{border:none;border-radius:10px;padding:10px 16px;background:linear-gradient(90deg,var(--cyan),#1e7bff);color:#04121f;font-family:inherit;font-weight:900;cursor:pointer;margin-top:12px;width:100%}
+.note{background:linear-gradient(135deg,rgba(255,209,102,.1),rgba(255,45,111,.05));border:1px solid rgba(255,209,102,.25);border-radius:14px;padding:16px;font-size:12px;line-height:1.9;color:#e8d9b8}
+.note b{color:var(--gold)}
+.videos{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-top:10px}
+.vcard{aspect-ratio:9/14;border-radius:10px;background:linear-gradient(135deg,#1e1e30,#141420);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:10px;color:#8fa6d8;text-align:center;padding:6px}
+.vcard video{width:100%;height:100%;object-fit:cover;border-radius:10px}
+</style>
 </head>
 <body>
-  <h1>📊 VIBE — لوحة التحكم</h1>
-  <div class="sub">إحصائيات مباشرة من السيرفر</div>
-
-  <div class="grid" id="cards"></div>
-
-  <h2>⚙️ إعدادات المكافآت</h2>
-  <table>
-    <tr><th>الإعداد</th><th>القيمة</th></tr>
-    <tr><td>مكافأة المشاهدة</td><td><input id="c_rewardView"></td></tr>
-    <tr><td>مكافأة الرفع</td><td><input id="c_rewardUpload"></td></tr>
-    <tr><td>مكافأة الإعجاب</td><td><input id="c_rewardLike"></td></tr>
-    <tr><td>مكافأة اليومية</td><td><input id="c_rewardDaily"></td></tr>
-    <tr><td>دخل الإعلان/مشاهدة</td><td><input id="c_adRevenuePerView"></td></tr>
-    <tr><td>حد أقصى يومي/مستخدم</td><td><input id="c_maxDailyEarnPerUser"></td></tr>
-  </table>
-  <button onclick="saveConfig()">💾 حفظ الإعدادات</button>
-
-  <div class="note">
-    💡 <b>معادلة الربح</b>: الدخل = عدد الإعلانات × دخل الإعلان. المصروف = مكافآت المستخدمين.<br>
-    لو المصروف أكبر من الدخل → غيّر الإعدادات هنا فوراً (قلّل المكافآت أو زوّد دخل الإعلان المفترض).<br>
-    الأرقام دي <b>محاكاة محلية</b> — عشان فلوس حقيقية لازم تربط AdMob ومنصة دفع فعليتين.
+<div class="wrap">
+  <div class="head">
+    <div class="brand"><div class="logo">🎛️</div><div><h1>VIBE Control Center</h1><p>مركز العمليات الحي — كل حاجة بتتحدث قدامك</p></div></div>
+    <div class="live"><span class="dot"></span><span id="liveText">LIVE · متصل</span></div>
   </div>
 
-  <script>
-    async function load(){
-      const r=await fetch('/api/admin/stats').then(r=>r.json());
-      const c=r.config;
-      const profit=r.profit;
-      document.getElementById('cards').innerHTML=`
-        <div class="card"><span>المستخدمين</span><b>${r.users}</b></div>
-        <div class="card"><span>الفيديوهات</span><b>${r.videos}</b></div>
-        <div class="card"><span>مشاهدات/إعلانات</span><b>${r.stats.adImpressions}</b></div>
-        <div class="card"><span>الدخل المقدّر</span><b>${r.revenueEstimate} ج.م</b></div>
-        <div class="card"><span>المصروف</span><b>${r.spent} ج.م</b></div>
-        <div class="card ${profit>=0?'profit':'loss'}"><span>الصافي</span><b>${profit} ج.م</b></div>`;
-      ['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>{
-        document.getElementById('c_'+k).value=c[k];
-      });
-    }
-    async function saveConfig(){
-      const b={};
-      ['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>{
-        b[k]=parseFloat(document.getElementById('c_'+k).value);
-      });
-      await fetch('/api/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
-      load();alert('تم الحفظ ✅');
-    }
-    load();setInterval(load,5000);
-  </script>
+  <div class="grid" id="kpis"></div>
+
+  <div class="panels">
+    <div class="panel"><h2><span class="b"></span>📈 حركة الأرباح والمصاريف</h2><canvas id="chart" width="700" height="180"></canvas></div>
+    <div class="panel"><h2><span class="b" style="background:var(--pink)"></span>⚡ آخر العمليات</h2><div class="log" id="log"><div class="li"><span class="ti">⏳</span><span class="tx">في انتظار أول عملية...</span></div></div></div>
+  </div>
+
+  <div class="panels">
+    <div class="panel cfg"><h2><span class="b" style="background:var(--gold)"></span>💰 اقتصاد التطبيق</h2>
+      <table><tr><th>الإعداد</th><th>القيمة (ج.م)</th></tr>
+        <tr><td>مكافأة المشاهدة</td><td><input id="c_rewardView"></td></tr>
+        <tr><td>مكافأة الرفع</td><td><input id="c_rewardUpload"></td></tr>
+        <tr><td>مكافأة الإعجاب</td><td><input id="c_rewardLike"></td></tr>
+        <tr><td>المكافأة اليومية</td><td><input id="c_rewardDaily"></td></tr>
+        <tr><td>دخل الإعلان/مشاهدة</td><td><input id="c_adRevenuePerView"></td></tr>
+        <tr><td>الحد الأقصى اليومي</td><td><input id="c_maxDailyEarnPerUser"></td></tr>
+      </table>
+      <button class="btn" onclick="saveCfg()">💾 حفظ وتطبيق</button>
+    </div>
+    <div class="panel"><h2><span class="b" style="background:var(--green)"></span>🎬 الفيديوهات على السيرفر</h2><div class="videos" id="videos"></div></div>
+  </div>
+
+  <div class="note">
+    💡 <b>معادلة الاستدامة:</b> الدخل (إعلانات × سعر الإعلان) لازم يغطي المصروف (مكافآت المستخدمين).<br>
+    الصافي الحالي: <b id="profitInline">0.00 ج.م</b> — لو سالب، قلّل المكافآت أو زوّد دخل الإعلان من الجدول فوق.<br>
+    الأرقام <b>محاكاة محلية</b>؛ بعد ربط AdMob الفعلي هتتحول لبيانات حقيقية.
+  </div>
+</div>
+
+<script>
+let history=[], lastLedger=0;
+async function load(){
+  try{
+    const r=await fetch('/api/admin/stats').then(r=>r.json());
+    const c=r.config,s=r.stats;
+    document.getElementById('kpis').innerHTML=`
+      <div class="kpi c1"><span class="ic">👥</span><div class="lb">المستخدمين</div><div class="vl">${r.users}</div><div class="trend">▲ مسجلين</div></div>
+      <div class="kpi c2"><span class="ic">🎬</span><div class="lb">الفيديوهات</div><div class="vl">${r.videos}</div><div class="trend">▲ منشورة</div></div>
+      <div class="kpi c3"><span class="ic">👀</span><div class="lb">المشاهدات/إعلانات</div><div class="vl">${s.adImpressions}</div><div class="trend">▲ تفاعل</div></div>
+      <div class="kpi c4"><span class="ic">💰</span><div class="lb">الدخل المقدّر</div><div class="vl">${r.revenueEstimate}</div><div class="trend">ج.م</div></div>
+      <div class="kpi c5"><span class="ic">📤</span><div class="lb">المصروف</div><div class="vl">${r.spent}</div><div class="trend">ج.م مكافآت</div></div>`;
+    document.getElementById('profitInline').textContent=r.profit.toFixed(2)+' ج.م';
+    ['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>{const e=document.getElementById('c_'+k);if(e&&!e.matches(':focus'))e.value=c[k]});
+    history.push({rev:r.revenueEstimate,spent:r.spent});if(history.length>40)history.shift();
+    drawChart();
+    loadVideos();
+  }catch(e){document.getElementById('liveText').textContent='⚠️ السيرفر مش متاح';document.querySelector('.dot').style.background='#ff6b6b'}
+}
+async function loadVideos(){
+  try{
+    const r=await fetch('/api/videos').then(r=>r.json());
+    const box=document.getElementById('videos');box.innerHTML='';
+    (r.videos||[]).slice(0,8).forEach(v=>{
+      const d=document.createElement('div');d.className='vcard';
+      const vd=document.createElement('video');vd.src=v.url;vd.muted=true;vd.playsInline=true;
+      vd.oncanplay=()=>vd.play().catch(()=>{});
+      d.appendChild(vd);
+      const lb=document.createElement('div');lb.textContent=(v.caption||'').slice(0,22)+' ❤'+v.likes;d.appendChild(lb);
+      box.appendChild(d);
+    });
+    if(!(r.videos||[]).length)box.innerHTML='<div class="vcard">لا توجد فيديوهات بعد</div>';
+  }catch(e){}
+}
+function drawChart(){
+  const c=document.getElementById('chart'),x=c.getContext('2d');
+  x.clearRect(0,0,c.width,c.height);
+  const pad=20,W=c.width-pad*2,H=c.height-pad*2;
+  const max=Math.max(1,...history.map(h=>Math.max(h.rev,h.spent)))*1.2;
+  // grid
+  x.strokeStyle='rgba(255,255,255,.07)';x.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=pad+H*(i/4);x.beginPath();x.moveTo(pad,y);x.lineTo(pad+W,y);x.stroke()}
+  const line=(key,color,fill)=>{
+    if(history.length<2)return;
+    x.beginPath();
+    history.forEach((h,i)=>{const px=pad+W*(i/(history.length-1)),py=pad+H-(h[key]/max)*H;i?x.lineTo(px,py):x.moveTo(px,py)});
+    x.strokeStyle=color;x.lineWidth=2.5;x.stroke();
+    if(fill){x.lineTo(pad+W,pad+H);x.lineTo(pad,pad+H);x.closePath();const g=x.createLinearGradient(0,pad,0,pad+H);g.addColorStop(0,fill);g.addColorStop(1,'transparent');x.fillStyle=g;x.fill()}
+  };
+  line('rev','#4dffb0','rgba(77,255,176,.2)');
+  line('spent','#ff6b6b',null);
+  if(history.length){const l=history[history.length-1];
+    x.fillStyle='#4dffb0';x.font='12px Cairo';x.fillText('دخل: '+l.rev,pad+4,pad+14);
+    x.fillStyle='#ff6b6b';x.fillText('مصروف: '+l.spent,pad+4,pad+30);}
+}
+async function saveCfg(){
+  const b={};['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>b[k]=parseFloat(document.getElementById('c_'+k).value));
+  await fetch('/api/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  alert('تم الحفظ ✅');load();
+}
+load();setInterval(load,2000);
+</script>
 </body>
 </html>
