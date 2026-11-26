@@ -79,7 +79,7 @@ const VIDEO_DIR = store.VIDEO_DIR;
 function send(res, code, data, type = 'application/json; charset=utf-8') {
   sec.secureHeaders(res);
   res.writeHead(code, { 'Content-Type': type });
-  res.end(typeof data === 'string' ? data : JSON.stringify(data));
+  res.end(Buffer.isBuffer(data) ? data : (typeof data === 'string' ? data : JSON.stringify(data)));
 }
 function body(req, limit = 60 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -1483,6 +1483,25 @@ async function route(req, res) {
   if (p === '/admin' && method === 'GET') {
     const html = fs.readFileSync(path.join(__dirname, 'admin.html'), 'utf8');
     return send(res, 200, html, 'text/html; charset=utf-8');
+  }
+
+  // 📱 خدمة ملفات التطبيق (نفس الدومين عشان الجلسة تتحفظ)
+  if (method === 'GET') {
+    const WEB_DIR = path.join(__dirname, '..', 'vibe-web');
+    const map = { '/app': 'index.html', '/': 'index.html' };
+    const rel = map[p] || (p.startsWith('/') ? p.slice(1) : '');
+    if (rel && !rel.includes('..') && !rel.includes('\\')) {
+      const fp = path.join(WEB_DIR, rel);
+      try {
+        if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
+          const ext = path.extname(fp).toLowerCase();
+          const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8',
+            '.css':'text/css; charset=utf-8', '.json':'application/json; charset=utf-8',
+            '.png':'image/png', '.svg':'image/svg+xml', '.mp4':'video/mp4', '.webm':'video/webm' };
+          return send(res, 200, fs.readFileSync(fp), types[ext] || 'application/octet-stream');
+        }
+      } catch (e) {}
+    }
   }
 
   return send(res, 404, { error: 'not found', path: p });
