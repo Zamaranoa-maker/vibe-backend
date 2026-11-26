@@ -18,6 +18,17 @@ const moderation = require('./lib/moderation-free');
 const storageGuard = require('./lib/storage-guard');
 const growth = require('./lib/growth');
 
+// 🚀 For You v1 — دوال SQL (security definer) لما Postgres يكون متصل
+async function recordEventSQL(userId, videoId, event, watchMs = 0, ratio = 0) {
+  if (!dbLayer.available || !videoId) return false;
+  try {
+    const pool = dbLayer.getPool();
+    await pool.query('SELECT record_video_event($1,$2,$3,$4,$5)',
+      [numericId(userId), numericId(videoId), event, watchMs, ratio]);
+    return true;
+  } catch (e) { return false; }
+}
+
 // 🚧 Phase 0 — الميزات المدفوعة مخفية (No paid services, no real-money features)
 const PHASE0_DISABLED = new Set(['coins','gifts','live','payouts']);
 function phase0Block(res, feature) {
@@ -196,6 +207,18 @@ async function route(req, res) {
   // liste الفيديوهات — For You v1 ranking
   if (p === '/api/videos' && method === 'GET') {
     const a = auth(req, db);
+    // 🚀 لو Postgres متصل: استخدم دوال الـ ranking الحقيقية
+    if (dbLayer.available && u.searchParams.get('feed') === 'foryou' && a) {
+      try {
+        const pool = dbLayer.getPool();
+        const { rows } = await pool.query('SELECT * FROM get_foryou($1,30)', [numericId(a.user.id)]);
+        const vids = rows.map(r => {
+          const v = Object.values(db.videos).find(x => numericId(x.id) === Number(r.video_id));
+          return v ? publicVideo(v) : null;
+        }).filter(Boolean);
+        if (vids.length) return send(res, 200, { videos:vids, ranked:true });
+      } catch (e) { /* fallback للـ JSON ranking */ }
+    }
     let list = Object.values(db.videos).filter(v => !(db.hiddenVideos||{})[v.id]);
 
     if (u.searchParams.get('feed') === 'foryou') {
