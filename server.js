@@ -193,6 +193,19 @@ async function route(req, res) {
     const file = path.join(VIDEO_DIR, id + '.' + ext);
     fs.writeFileSync(file, buf);
     storageGuard.logUsage(buf.length);
+    // 🗄️ سجّل الفيديو في Postgres عشان الـ For You ranking يشتغل
+    if (dbLayer.available) {
+      try {
+        const pg = dbLayer.getPool();
+        const r = await pg.query(
+          `INSERT INTO videos (creator_id, category, duration_ms, file, caption)
+           VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+          [numericId(a.user.id), String(b.tags||'general').split(' ')[0]||'general',
+           parseInt(b.durationMs)||15000, path.basename(file), String(b.caption||'').slice(0,300)]);
+        db.videos[id] && (db.videos[id].pgId = r.rows[0].id);
+        store.commit();
+      } catch (e) { console.warn('[pg video] failed:', e.message); }
+    }
     db.videos[id] = {
       id, owner: a.user.id, caption: sec.esc(String(b.caption || '')).slice(0, 300),
       tags: sec.esc(String(b.tags || '')).slice(0, 100), file: path.basename(file),
@@ -211,9 +224,12 @@ async function route(req, res) {
     if (dbLayer.available && u.searchParams.get('feed') === 'foryou' && a) {
       try {
         const pool = dbLayer.getPool();
-        const { rows } = await pool.query('SELECT * FROM get_foryou($1,30)', [numericId(a.user.id)]);
+        const { rows } = await pool.query('SELECT * FROM get_for_you($1,30,$2::bigint[])',
+          [numericId(a.user.id), []]);
         const vids = rows.map(r => {
-          const v = Object.values(db.videos).find(x => numericId(x.id) === Number(r.video_id));
+          // ابحث بالـ pgId المخزّن وقت الرفع، أو بالمعرّف النصي
+          const v = Object.values(db.videos).find(x =>
+            String(x.pgId||'') === String(r.video_id) || x.id === String(r.video_id));
           return v ? publicVideo(v) : null;
         }).filter(Boolean);
         if (vids.length) return send(res, 200, { videos:vids, ranked:true });
