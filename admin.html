@@ -69,7 +69,9 @@ canvas{width:100%;height:180px}
         <tr><td>مكافأة الرفع</td><td><input id="c_rewardUpload"></td></tr>
         <tr><td>مكافأة الإعجاب</td><td><input id="c_rewardLike"></td></tr>
         <tr><td>المكافأة اليومية</td><td><input id="c_rewardDaily"></td></tr>
-        <tr><td>دخل الإعلان/مشاهدة</td><td><input id="c_adRevenuePerView"></td></tr>
+        <tr><td>🟦 إعلان بانر</td><td><input id="c_banner"></td></tr>
+        <tr><td>🟥 إعلان متغطي</td><td><input id="c_interstitial"></td></tr>
+        <tr><td>🟩 إعلان بمكافأة</td><td><input id="c_rewarded"></td></tr>
         <tr><td>الحد الأقصى اليومي</td><td><input id="c_maxDailyEarnPerUser"></td></tr>
       </table>
       <button class="btn" onclick="saveCfg()">💾 حفظ وتطبيق</button>
@@ -97,7 +99,8 @@ async function load(){
       <div class="kpi c4"><span class="ic">💰</span><div class="lb">الدخل المقدّر</div><div class="vl">${r.revenueEstimate}</div><div class="trend">ج.م</div></div>
       <div class="kpi c5"><span class="ic">📤</span><div class="lb">المصروف</div><div class="vl">${r.spent}</div><div class="trend">ج.م مكافآت</div></div>`;
     document.getElementById('profitInline').textContent=r.profit.toFixed(2)+' ج.م';
-    ['rewardView','rewardUpload','rewardLike','rewardDaily','adRevenuePerView','maxDailyEarnPerUser'].forEach(k=>{const e=document.getElementById('c_'+k);if(e&&!e.matches(':focus'))e.value=c[k]});
+    ['rewardView','rewardUpload','rewardLike','rewardDaily','maxDailyEarnPerUser'].forEach(k=>{const e=document.getElementById('c_'+k);if(e&&!e.matches(':focus'))e.value=c[k]});
+    ['banner','interstitial','rewarded'].forEach(k=>{const e=document.getElementById('c_'+k);if(e&&!e.matches(':focus'))e.value=c.adPrices[k]});
     history.push({rev:r.revenueEstimate,spent:r.spent});if(history.length>40)history.shift();
     drawChart();
     loadVideos();
