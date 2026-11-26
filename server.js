@@ -14,6 +14,15 @@ const wallet = require('./lib/wallet');
 const sec = require('./lib/security');
 const safety = require('./lib/safety');
 const eco = require('./lib/economy');
+const moderation = require('./lib/moderation-free');
+const storageGuard = require('./lib/storage-guard');
+const growth = require('./lib/growth');
+
+// 🚧 Phase 0 — الميزات المدفوعة مخفية (No paid services, no real-money features)
+const PHASE0_DISABLED = new Set(['coins','gifts','live','payouts']);
+function phase0Block(res, feature) {
+  return send(res, 403, { error:'هذه الميزة غير متاحة في إصدار Phase 0', feature, phase:'free-launch' });
+}
 const dbLayer = require('./lib/db');
 const walletDB = require('./lib/wallet-db');
 const billing = require('./lib/billing');
@@ -116,6 +125,11 @@ async function route(req, res) {
   const db = store.get();
   const method = req.method;
 
+  // 🚧 Phase 0: حظر الميزات المدفوعة (عملات/هدايا/لايف/سحب فلوس)
+  if (p.startsWith('/api/economy/') && !p.includes('/catalog') && !p.includes('/wallet'))
+    return phase0Block(res, 'economy');
+  if (p.startsWith('/api/creator/payout') && method === 'POST') return phase0Block(res, 'payouts');
+
   if (method === 'OPTIONS') return send(res, 204, '');
 
   // Health
@@ -155,16 +169,19 @@ async function route(req, res) {
     const b = await body(req);
     if (!b.data) return send(res, 400, { error: 'data مطلوب' });
     const buf = Buffer.from(b.data, 'base64');
-    if (buf.length > 50 * 1024 * 1024) return send(res, 400, { error: 'الفيديو كبير جداً (أقصى 50MB)' });
+    if (buf.length > 25 * 1024 * 1024) return send(res, 400, { error: 'الفيديو كبير جداً (أقصى 25MB)' });
+    // 💾 حاجز التخزين اليومي
+    const guard = storageGuard.canUpload(buf.length);
+    if (!guard.ok) return send(res, 429, { error: guard.message, reason: guard.reason });
     if (!sec.isRealVideo(buf)) return send(res, 400, { error: 'الملف مش فيديو صالح (MP4/WebM بس)' });
     // 🛡️ فلتر المحتوى: كلمات ممنوعة في الوصف/الهاشتاجات
-    const text = (String(b.caption||'') + ' ' + String(b.tags||'')).toLowerCase();
-    const bad = (db.bannedWords||[]).some(w => text.includes(w.toLowerCase()));
-    if (bad) return send(res, 400, { error: 'المحتوى مخالف لمعايير المجتمع ❌' });
+    const mod = moderation.checkTextLocal(String(b.caption||'') + ' ' + String(b.tags||''));
+    if (mod.flagged) return send(res, 400, { error: 'المحتوى مخالف لمعايير المجتمع ❌', hits:mod.hits });
     const id = 'v_' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
     const ext = (b.mime || 'video/mp4').includes('webm') ? 'webm' : 'mp4';
     const file = path.join(VIDEO_DIR, id + '.' + ext);
     fs.writeFileSync(file, buf);
+    storageGuard.logUsage(buf.length);
     db.videos[id] = {
       id, owner: a.user.id, caption: sec.esc(String(b.caption || '')).slice(0, 300),
       tags: sec.esc(String(b.tags || '')).slice(0, 100), file: path.basename(file),
@@ -176,13 +193,40 @@ async function route(req, res) {
     return send(res, 201, { video: publicVideo(db.videos[id]), reward: r });
   }
 
-  // liste الفيديوهات (بدون المخفية للمراجعة)
+  // liste الفيديوهات — For You v1 ranking
   if (p === '/api/videos' && method === 'GET') {
-    const list = Object.values(db.videos)
-      .filter(v => !(db.hiddenVideos||{})[v.id])
-      .sort((x, y) => y.createdAt - x.createdAt)
-      .map(v => publicVideo(v));
-    return send(res, 200, { videos: list });
+    const a = auth(req, db);
+    let list = Object.values(db.videos).filter(v => !(db.hiddenVideos||{})[v.id]);
+
+    if (u.searchParams.get('feed') === 'foryou') {
+      const now = Date.now();
+      const scored = list.map(v => {
+        const an = v.analytics || {};
+        const likes = (v.likes||[]).length;
+        const views = an.views || 0;
+        const completion = views ? (an.avgWatched||0)/100 : 0.2;
+        const engagement = views ? likes/views : 0;
+        const ageHours = (now - v.createdAt)/3600000;
+        const recency = Math.max(0, 1 - ageHours/72);
+        // بونص صغير للمبدعين الجدد (exposure test)
+        const creatorVideos = Object.values(db.videos).filter(x=>x.owner===v.owner).length;
+        const newCreatorBoost = creatorVideos <= 3 ? 0.15 : 0;
+        return { v, score: completion*0.4 + engagement*0.3 + recency*0.2 + newCreatorBoost };
+      });
+      scored.sort((a,b) => b.score - a.score);
+      // diversity: حد أقصى فيديوين لكل صانع في أول 12
+      const seen = {}, out = [];
+      for (const s of scored) {
+        const c = seen[s.v.owner]||0;
+        if (c >= 2 && out.length >= 6) continue;
+        seen[s.v.owner] = c+1; out.push(s.v);
+        if (out.length >= 30) break;
+      }
+      list = out;
+    } else {
+      list.sort((x,y)=>y.createdAt-x.createdAt);
+    }
+    return send(res, 200, { videos: list.map(v => publicVideo(v)) });
   }
 
   // 🚨 إبلاغ عن فيديو (إبلاغين = إخفاء تلقائي للمراجعة)
@@ -505,6 +549,35 @@ async function route(req, res) {
     db.stats.adByType[type] = (db.stats.adByType[type] || 0) + 1;
     store.commit();
     return send(res, 200, { ok: true, type, revenue: price, totalRevenue: db.stats.adRevenue });
+  }
+
+  /* ═══════════════════ GROWTH (Phase 0) ═══════════════════ */
+
+  // 🎟️ كود الدعوة + الشارات
+  if (p === '/api/growth/me' && method === 'GET') {
+    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    db.growth = db.growth || {};
+    const g = db.growth[a.user.id] || (db.growth[a.user.id]={code:growth.makeCode(a.user.id),invites:0,badges:['founding']});
+    return send(res,200,{code:g.code,invites:g.invites,badges:g.badges,shareUrl:'https://vibe.app/i/'+g.code});
+  }
+  // تفعيل كود دعوة (بشرط تسجيل جديد) — المكافأة شارة بس
+  if (p === '/api/growth/redeem' && method === 'POST') {
+    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    const b = await body(req); const code = String(b.code||'').toUpperCase();
+    const owner = Object.entries(db.growth||{}).find(([,g])=>g.code===code);
+    if (!owner || owner[0]===a.user.id) return send(res,400,{error:'كود غير صالح'});
+    db.growth[owner[0]].invites++;
+    const me = db.growth[a.user.id]||(db.growth[a.user.id]={code:growth.makeCode(a.user.id),invites:0,badges:[]});
+    if (db.growth[owner[0]].invites>=3 && !db.growth[owner[0]].badges.includes('inviter'))
+      db.growth[owner[0]].badges.push('inviter');
+    store.commit(); return send(res,200,{ok:true,badge:'🎁 Inviter'});
+  }
+  // 🏆 لوحة المبدعين الأسبوعية
+  if (p === '/api/growth/leaderboard' && method === 'GET') {
+    const data = growth.leaderboard(db.users, db.videos);
+    const list = Object.values(data).sort((a,b)=>b.views-a.views).slice(0,10)
+      .map((x,i)=>({...x,rank:i+1,badge:i===0?'👑':''}));
+    return send(res,200,{list});
   }
 
   /* ═══════════════════ COINS, GIFTS & LIVE ═══════════════════ */

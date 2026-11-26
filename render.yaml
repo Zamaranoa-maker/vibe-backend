@@ -3,10 +3,16 @@ services:
     name: vibe-backend
     runtime: node
     plan: free
-    buildCommand: "npm install"
-    startCommand: "node server.js"
+    region: frankfurt
+    branch: main
+    buildCommand: npm install
+    startCommand: node server.js
     envVars:
       - key: PORT
         value: 3000
-      - key: NODE_ENV
-        value: production
+      - key: PGSSL
+        value: true
+      - key: DATABASE_URL
+        sync: false
+      - key: ANDROID_PACKAGE_NAME
+        value: com.vibe.app
