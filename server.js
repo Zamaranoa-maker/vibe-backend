@@ -1472,6 +1472,13 @@ async function route(req, res) {
     return send(res, 200, { config: db.config });
   }
 
+  // صفحة التسجيل / الدخول (تفتح من المتصفح)
+  if ((p === '/register' || p === '/register.html') && method === 'GET') {
+    const file = path.join(__dirname, 'register.html');
+    const html = fs.readFileSync(file, 'utf8');
+    return send(res, 200, html, 'text/html; charset=utf-8');
+  }
+
   // صفحة الأدمن
   if (p === '/admin' && method === 'GET') {
     const html = fs.readFileSync(path.join(__dirname, 'admin.html'), 'utf8');

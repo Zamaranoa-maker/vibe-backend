@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>تسجيل الدخول — ڨايب بلس VIBE+</title>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet" />
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Cairo',sans-serif;background:radial-gradient(circle at 50% 0%,#18213a,#08080f 70%);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{width:100%;max-width:420px;background:#151524;border:1px solid rgba(255,255,255,.12);border-radius:22px;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.badge{display:inline-block;background:linear-gradient(90deg,#25e5ff,#1e7bff);color:#04121f;font-weight:900;border-radius:20px;padding:5px 14px;font-size:11px}
+h1{font-size:24px;margin:16px 0 6px}
+p.sub{color:#b8c8e8;font-size:13px;line-height:1.7;margin-bottom:20px}
+label{display:block;font-size:12px;color:#b8c8e8;margin:12px 0 6px}
+input{width:100%;background:#222;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:12px;color:#fff;font-family:inherit;font-size:14px;outline:none}
+input:focus{border-color:#25e5ff}
+.remember{display:flex;align-items:center;gap:8px;font-size:12px;color:#b8c8e8;margin:14px 0;cursor:pointer}
+.remember input{width:auto}
+.btns{display:flex;gap:8px;margin-top:6px}
+button{flex:1;border:none;border-radius:12px;padding:12px;font-family:inherit;font-weight:900;font-size:13px;cursor:pointer}
+#loginBtn{background:linear-gradient(90deg,#25e5ff,#1e7bff);color:#04121f}
+#regBtn{background:#222;color:#fff;border:1px solid rgba(255,255,255,.15)!important}
+#msg{margin-top:14px;font-size:12px;line-height:1.7;min-height:20px}
+.ok{color:#4ddb8f}.err{color:#ff6b6b}
+.hint{font-size:10px;color:#8fa6d8;margin-top:16px;line-height:1.8}
+a{color:#25e5ff;text-decoration:none;font-weight:700}
+#result{display:none;margin-top:16px;background:rgba(77,219,143,.08);border:1px solid #4ddb8f;border-radius:12px;padding:12px;font-size:12px;line-height:1.9}
+code{background:#222;padding:2px 6px;border-radius:5px;direction:ltr;display:inline-block}
+</style>
+</head>
+<body>
+<div class="card">
+  <span class="badge">🎬 ڨايب بلس VIBE+</span>
+  <h1>أهلاً بك 👋</h1>
+  <p class="sub">اعمل حساب بالمستخدم والباسورد عشان تحفظ حسابك وتقدر ترجع له في أي وقت.</p>
+
+  <label for="user">اسم المستخدم</label>
+  <input id="user" placeholder="مثلاً: ahmed2026" autocomplete="username" />
+
+  <label for="pass">كلمة المرور</label>
+  <input id="pass" type="password" placeholder="6 أحرف على الأقل" autocomplete="current-password" />
+
+  <label class="remember"><input id="remember" type="checkbox" checked /> تذكّرني على هذا الجهاز</label>
+
+  <div class="btns">
+    <button id="loginBtn">دخول</button>
+    <button id="regBtn">حساب جديد</button>
+  </div>
+
+  <div id="msg"></div>
+
+  <div id="result">
+    ✅ تم تسجيل الحساب!<br>
+    اسم المستخدم: <code id="rUser"></code><br>
+    دلوقتي افتح التطبيق وادخل بنفس البيانات، أو ارجع لصفحة التحميل: <a href="download.html">download.html</a>
+  </div>
+
+  <p class="hint">
+    🔒 الباسورد مش محفوظ كنص على الجهاز أو في المتصفح — بيُخزّن مشفر في Supabase.<br>
+    السيرفر لازم يكون شغال على <code>http://localhost:3000</code>.
+  </p>
+</div>
+
+<script>
+const API = 'http://localhost:3000';
+const $ = id => document.getElementById(id);
+const msg = (t, ok) => { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'err'; };
+
+async function go(kind) {
+  const username = $('user').value.trim();
+  const password = $('pass').value;
+  if (!username || !password) return msg('اكتب المستخدم والباسورد', false);
+  msg('جاري الاتصال بالسيرفر...', true);
+  try {
+    const r = await fetch(API + '/api/auth/' + kind, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) return msg(d.error || 'حصلت مشكلة', false);
+    if ($('remember').checked) {
+      localStorage.setItem('vibeToken', d.token);
+      localStorage.setItem('vibeUsername', username);
+    } else {
+      sessionStorage.setItem('vibeToken', d.token);
+      sessionStorage.setItem('vibeUsername', username);
+    }
+    msg(kind === 'register' ? '✅ تم إنشاء الحساب' : '✅ تم تسجيل الدخول', true);
+    $('rUser').textContent = username;
+    $('result').style.display = 'block';
+  } catch (e) {
+    msg('السيرفر مش شغال — شغّل: node server.js من مجلد vibe-backend', false);
+  }
+}
+$('regBtn').onclick = () => go('register');
+$('loginBtn').onclick = () => go('login');
+$('user').value = localStorage.getItem('vibeUsername') || '';
+</script>
+</body>
+</html>
