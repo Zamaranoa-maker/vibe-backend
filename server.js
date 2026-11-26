@@ -1485,6 +1485,22 @@ async function route(req, res) {
     return send(res, 200, html, 'text/html; charset=utf-8');
   }
 
+  // 🔑 دخول سريع للتطوير المحلي فقط (معطّل في production)
+  if (p === '/api/dev/login' && method === 'GET' && process.env.NODE_ENV !== 'production' && dbLayer.available) {
+    const username = String(u.searchParams.get('username') || '').slice(0, 30);
+    try {
+      const row = await dbLayer.getPool().query('SELECT id FROM users WHERE username=$1', [username]);
+      if (!row.rows.length) return send(res, 404, { error: 'user not found' });
+      let found = Object.entries(db.users).find(([, v]) => v.deviceId === username);
+      let devToken = found ? found[0] : crypto.randomBytes(24).toString('hex');
+      if (!found) {
+        db.users[devToken] = { id: username, deviceId: username, createdAt: Date.now() };
+        wallet.ensure(username); store.commit();
+      }
+      return send(res, 200, { token: devToken, user: { id: username, username } });
+    } catch (e) { return send(res, 500, { error: e.message }); }
+  }
+
   // 📱 خدمة ملفات التطبيق (نفس الدومين عشان الجلسة تتحفظ)
   if (method === 'GET') {
     const WEB_DIR = path.join(__dirname, '..', 'vibe-web');
