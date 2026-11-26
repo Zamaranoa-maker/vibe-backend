@@ -590,6 +590,72 @@ async function route(req, res) {
     return send(res, 200, { ok: true, type, revenue: price, totalRevenue: db.stats.adRevenue });
   }
 
+  /* ═══════════════════ SEARCH / HASHTAGS / TRENDING ═══════════════════ */
+  if (dbLayer.available) {
+    const pool = dbLayer.getPool();
+    const uidOf = req => { const a = auth(req, db); return a ? numericId(a.user.id) : 0; };
+
+    if (p === '/api/search' && method === 'GET') {
+      const q = u.searchParams.get('q') || '';
+      const page = Math.max(0, parseInt(u.searchParams.get('page') || '0'));
+      try {
+        const guard = await pool.query('SELECT search_guard($1) g', [q]);
+        const action = guard.rows[0]?.g || 'ok';
+        if (action === 'support') return send(res, 200, { support:true, videos:[], users:[] });
+        if (action === 'hide') return send(res, 200, { support:false, videos:[], users:[] });
+        const [v, us] = await Promise.all([
+          pool.query('SELECT * FROM search_videos($1,$2,20,$3)', [uidOf(req), q, page*20]),
+          page === 0 ? pool.query('SELECT * FROM search_users($1,$2,10)', [uidOf(req), q]) : Promise.resolve({rows:[]}),
+        ]);
+        return send(res, 200, { support:false, videos:v.rows.map(r=>String(r.video_id)), users:us.rows, page });
+      } catch (e) { return send(res, 500, { error:e.message }); }
+    }
+    if (p === '/api/search/suggest' && method === 'GET') {
+      try {
+        const r = await pool.query('SELECT * FROM search_suggest($1)', [u.searchParams.get('q') || '']);
+        return send(res, 200, { suggestions:r.rows });
+      } catch (e) { return send(res, 200, { suggestions:[] }); }
+    }
+    if (p === '/api/hashtag' && method === 'GET') {
+      try {
+        const r = await pool.query('SELECT * FROM get_hashtag_videos($1,$2,20,$3)',
+          [uidOf(req), u.searchParams.get('tag') || '', Math.max(0, parseInt(u.searchParams.get('page')||'0'))*20]);
+        return send(res, 200, { videos:r.rows.map(x=>String(x.video_id)) });
+      } catch (e) { return send(res, 200, { videos:[] }); }
+    }
+    if (p === '/api/trending' && method === 'GET') {
+      try {
+        const [tags, vids] = await Promise.all([
+          pool.query('SELECT * FROM get_trending_hashtags(15)'),
+          pool.query('SELECT * FROM get_trending_videos($1,20,0)', [uidOf(req)]),
+        ]);
+        return send(res, 200, { tags:tags.rows, videos:vids.rows.map(x=>String(x.video_id)) });
+      } catch (e) { return send(res, 200, { tags:[], videos:[] }); }
+    }
+    if (p === '/api/admin/search-terms' && method === 'GET') {
+      const r = await pool.query('SELECT * FROM blocked_search_terms ORDER BY term');
+      return send(res, 200, { terms:r.rows });
+    }
+    if (p === '/api/admin/search-terms' && method === 'POST') {
+      const b = await body(req);
+      await pool.query('INSERT INTO blocked_search_terms(term,action) VALUES ($1,$2) ON CONFLICT (term) DO UPDATE SET action=EXCLUDED.action', [b.term, b.action||'hide']);
+      return send(res, 200, { ok:true });
+    }
+    if (p.startsWith('/api/admin/search-terms/') && method === 'DELETE') {
+      await pool.query('DELETE FROM blocked_search_terms WHERE term=$1', [decodeURIComponent(p.split('/')[4])]);
+      return send(res, 200, { ok:true });
+    }
+    if (p === '/api/admin/hashtags' && method === 'GET') {
+      const r = await pool.query('SELECT * FROM trending_hashtags ORDER BY trend_score DESC LIMIT 50');
+      return send(res, 200, { hashtags:r.rows });
+    }
+    if (p.startsWith('/api/admin/hashtags/') && method === 'POST') {
+      const b = await body(req);
+      await pool.query('UPDATE hashtags SET banned=$2 WHERE id=$1', [parseInt(p.split('/')[4]), !!b.banned]);
+      return send(res, 200, { ok:true });
+    }
+  }
+
   /* ═══════════════════ GROWTH (Phase 0) ═══════════════════ */
 
   // 🎟️ كود الدعوة + الشارات
