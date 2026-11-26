@@ -35,6 +35,20 @@ function phase0Block(res, feature) {
   return send(res, 403, { error:'هذه الميزة غير متاحة في إصدار Phase 0', feature, phase:'free-launch' });
 }
 const dbLayer = require('./lib/db');
+
+/* ---------- يوزر + باسورد (scrypt، بدون مكتبات مدفوعة) ---------- */
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+  return salt + ':' + hash;
+}
+function verifyPassword(pw, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hex] = stored.split(':');
+  const a = crypto.scryptSync(String(pw), salt, 64);
+  const b = Buffer.from(hex, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 const walletDB = require('./lib/wallet-db');
 const billing = require('./lib/billing');
 store.load();
@@ -149,6 +163,75 @@ async function route(req, res) {
   }
 
   // تسجيل/دخول جهاز
+  /* ─── يوزر + باسورد ─── */
+  if (p === '/api/auth/register' && method === 'POST') {
+    const b = await body(req);
+    const username = String(b.username || '').trim().slice(0, 30);
+    const pw = String(b.password || '');
+    if (!/^[\p{L}\p{N}_]{3,30}$/u.test(username)) return send(res, 400, { error: 'اليوزر من 3 لـ 30 حرف أو رقم أو _' });
+    if (pw.length < 6) return send(res, 400, { error: 'الباسورد على الأقل 6 حروف' });
+    try {
+      if (dbLayer.available) {
+        const pool = dbLayer.getPool();
+        const exists = await pool.query('SELECT 1 FROM users WHERE username=$1 OR external_id=$1', [username]);
+        if (exists.rows.length) return send(res, 409, { error: 'اليوزر مستخدم قبل كده' });
+        const id = numericId(username);
+        await pool.query(`INSERT INTO users(id,username,external_id,status,password_hash)
+          VALUES($1,$2,$2,'active',$3)`, [id, username, hashPassword(pw)]);
+        await pool.query(`INSERT INTO profiles(id,username,display_name) VALUES($1,$2,$2)
+          ON CONFLICT (id) DO NOTHING`, [id, username]);
+      }
+      let found = Object.entries(db.users).find(([, v]) => v.deviceId === username);
+      let token = found ? found[0] : crypto.randomBytes(24).toString('hex');
+      if (!found) {
+        const user = { id: username, deviceId: username, createdAt: Date.now() };
+        db.users[token] = user;
+        db.stats.signups++;
+        wallet.ensure(username);
+        store.commit();
+      }
+      return send(res, 201, { token, user: { id: username, username }, isNew: true });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/auth/login' && method === 'POST') {
+    const b = await body(req);
+    const username = String(b.username || '').trim().slice(0, 30);
+    const pw = String(b.password || '');
+    try {
+      let ok = false, dbId = null;
+      if (dbLayer.available) {
+        const r = await dbLayer.getPool().query(
+          'SELECT id,password_hash FROM users WHERE username=$1', [username]);
+        if (r.rows[0]) { ok = verifyPassword(pw, r.rows[0].password_hash); dbId = r.rows[0].id; }
+      }
+      if (!ok) return send(res, 401, { error: 'اليوزر أو الباسورد غلط' });
+      let found = Object.entries(db.users).find(([, v]) => v.deviceId === username);
+      let token = found ? found[0] : crypto.randomBytes(24).toString('hex');
+      if (!found) {
+        db.users[token] = { id: username, deviceId: username, createdAt: Date.now() };
+        wallet.ensure(username);
+        store.commit();
+      }
+      return send(res, 200, { token, user: { id: username, username, dbId }, ok: true });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/auth/session' && method === 'GET') {
+    const a = auth(req, db);
+    if (!a) return send(res, 200, { loggedIn: false });
+    let admin = false, dbId = null, ageTier = null;
+    if (dbLayer.available) {
+      try {
+        const r = await dbLayer.getPool().query(
+          `SELECT u.id, p.age_tier, is_admin(u.id) adm FROM users u
+           LEFT JOIN profiles p ON p.id=u.id WHERE u.external_id=$1`, [String(a.user.id)]);
+        if (r.rows[0]) { dbId = r.rows[0].id; admin = !!r.rows[0].adm; ageTier = r.rows[0].age_tier; }
+      } catch (e) {}
+    }
+    return send(res, 200, { loggedIn: true, user: { id: a.user.id, username: a.user.id }, dbId, admin, ageTier });
+  }
+
   if (p === '/api/auth' && method === 'POST') {
     const b = await body(req);
     const deviceId = String(b.deviceId || '').slice(0, 100);
