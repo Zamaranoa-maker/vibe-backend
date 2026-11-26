@@ -210,7 +210,7 @@ async function route(req, res) {
       id, owner: a.user.id, caption: sec.esc(String(b.caption || '')).slice(0, 300),
       tags: sec.esc(String(b.tags || '')).slice(0, 100), file: path.basename(file),
       size: buf.length, mime: b.mime || 'video/mp4',
-      createdAt: Date.now(), likes: [], views: {},
+      createdAt: Date.now(), likes: [], views: {}, status: 'pending',
     };
     store.commit();
     const r = wallet.add(a.user.id, db.config.rewardUpload, 'upload', 'رفع فيديو: ' + id);
@@ -230,12 +230,17 @@ async function route(req, res) {
           // ابحث بالـ pgId المخزّن وقت الرفع، أو بالمعرّف النصي
           const v = Object.values(db.videos).find(x =>
             String(x.pgId||'') === String(r.video_id) || x.id === String(r.video_id));
-          return v ? publicVideo(v) : null;
+          if (!v) return null;
+          const out = publicVideo(v); out.source = r.source; return out;
         }).filter(Boolean);
         if (vids.length) return send(res, 200, { videos:vids, ranked:true });
       } catch (e) { /* fallback للـ JSON ranking */ }
     }
-    let list = Object.values(db.videos).filter(v => !(db.hiddenVideos||{})[v.id]);
+    // 🛡️ المحتوى غير المعتمد لا يظهر للغير (إلا لصاحبه)
+    const me = a ? a.user.id : null;
+    let list = Object.values(db.videos).filter(v =>
+      !(db.hiddenVideos||{})[v.id] &&
+      ((v.status || 'approved') === 'approved' || v.owner === me));
 
     if (u.searchParams.get('feed') === 'foryou') {
       const now = Date.now();
@@ -653,6 +658,233 @@ async function route(req, res) {
       const b = await body(req);
       await pool.query('UPDATE hashtags SET banned=$2 WHERE id=$1', [parseInt(p.split('/')[4]), !!b.banned]);
       return send(res, 200, { ok:true });
+    }
+  }
+
+  /* ═══════════════════ TRUST & SAFETY ═══════════════════ */
+  if (dbLayer.available) {
+    const pool = dbLayer.getPool();
+    // كل استعلام بياخد كليان خاص، يعيّن app.user عشان سياسات RLS، وبعدين يرجّعه للمسبح
+    const withUser = async (fn) => {
+      const client = await pool.connect();
+      try {
+        const a = auth(req, db);
+        await client.query('SELECT set_config($1,$2,false)', ['app.user', String(a ? a.user.id : '')]);
+        return await fn(client, a ? numericId(a.user.id) : 0, a);
+      } finally { client.release(); }
+    };
+
+    // إعدادات الأمان (خطوط المساعدة، الحدود...) — عام
+    if (p === '/api/safety/config' && method === 'GET') {
+      try {
+        const r = await pool.query(`SELECT key,value FROM safety_config`);
+        const cfg = {}; r.rows.forEach(x => cfg[x.key] = x.value);
+        return send(res, 200, cfg);
+      } catch (e) { return send(res, 200, {}); }
+    }
+
+    // بوابة العمر
+    if (p === '/api/safety/birthdate' && method === 'POST') {
+      const b = await body(req);
+      const acc = auth(req, db);
+      try {
+        let realUid = 0;
+        if (acc) {
+          const ext = String(acc.user.id);
+          const u = await pool.query(`INSERT INTO users(external_id,status) VALUES($1,'active')
+            ON CONFLICT (external_id) DO UPDATE SET status='active' RETURNING id`, [ext]);
+          realUid = u.rows[0].id;
+        }
+        const tier = await withUser(async (cl, uid) => {
+          const who = realUid || uid;
+          // تأكد إن البروفايل موجود قبل ما نخزّن تاريخ الميلاد
+          await cl.query(`INSERT INTO profiles(id,username,display_name) VALUES($1,$2,$2)
+            ON CONFLICT (id) DO NOTHING`, [who, String(acc ? acc.user.id : who)]);
+          const r = await cl.query('SELECT set_birthdate($1,$2::date) t', [who, b.birth]);
+          return r.rows[0]?.t;
+        });
+        return send(res, 200, { result: tier });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // حالة الحساب (لشاشة الحظر/التقييد)
+    if (p === '/api/safety/status' && method === 'GET') {
+      try {
+        const r = await withUser((cl, uid) => cl.query(
+          `SELECT status,age_tier,is_private,restricted_until,ban_reason FROM profiles WHERE id=$1`, [uid]));
+        return send(res, 200, r.rows[0] || { status: 'active' });
+      } catch (e) { return send(res, 200, { status: 'active' }); }
+    }
+
+    // بلاغ
+    if (p === '/api/safety/report' && method === 'POST') {
+      const b = await body(req);
+      try {
+        const id = await withUser((cl, uid) => cl.query(
+          'SELECT submit_report($1,$2,$3,$4,$5) id',
+          [uid, b.type, String(b.id), b.reason, b.details || '']).then(r => r.rows[0]?.id));
+        return send(res, 200, { ok: true, duplicate: id == null, id });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // حظر مستخدم
+    if (p === '/api/safety/block' && method === 'POST') {
+      const b = await body(req);
+      try {
+        await withUser((cl, uid) => cl.query(
+          `INSERT INTO blocks(blocker_id,blocked_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,
+          [uid, numericId(String(b.other))]));
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // إشعارات / عقوبات / استئناف
+    if (p === '/api/safety/notices' && method === 'GET') {
+      try {
+        const r = await withUser((cl, uid) => cl.query(
+          'SELECT * FROM user_notices WHERE user_id=$1 ORDER BY created_at DESC LIMIT 30', [uid]));
+        return send(res, 200, { notices: r.rows });
+      } catch (e) { return send(res, 200, { notices: [] }); }
+    }
+    if (p === '/api/safety/strikes' && method === 'GET') {
+      try {
+        const r = await withUser((cl, uid) => cl.query(
+          'SELECT * FROM strikes WHERE user_id=$1 AND NOT revoked ORDER BY created_at DESC', [uid]));
+        return send(res, 200, { strikes: r.rows });
+      } catch (e) { return send(res, 200, { strikes: [] }); }
+    }
+    if (p === '/api/safety/appeal' && method === 'POST') {
+      const b = await body(req);
+      try {
+        await withUser((cl, uid) => cl.query('SELECT submit_appeal($1,$2,$3)',
+          [uid, b.strikeId, b.message]));
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // مراجعة آلية: Edge Function لو متاحة، والا فحص محلي مجاني (fail-closed)
+    if (p === '/api/safety/moderate' && method === 'POST') {
+      const b = await body(req);
+      try {
+        const result = await withUser(async (cl, uid) => {
+          const v = await cl.query('SELECT creator_id,caption,status FROM videos WHERE id=$1', [b.videoId]);
+          if (!v.rows[0] || String(v.rows[0].creator_id) !== String(uid))
+            throw new Error('forbidden');
+          const cfg = await cl.query(`SELECT value FROM safety_config WHERE key='new_creator_review_count'`);
+          const need = Number(cfg.rows[0]?.value || 3);
+          const txt = await cl.query('SELECT text_check($1) c', [v.rows[0].caption || '']);
+          const check = txt.rows[0]?.c;
+          if (check === 'block') {
+            await cl.query(`UPDATE videos SET status='removed' WHERE id=$1`, [b.videoId]);
+            return { status: 'removed', reason: 'blocked_word' };
+          }
+          // محاولة استدعاء Edge Function لو متهيّأة
+          const fnUrl = process.env.MODERATE_FUNCTION_URL;
+          if (fnUrl && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+            try {
+              const fr = await fetch(fnUrl, {
+                method:'POST',
+                headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+process.env.SUPABASE_SERVICE_ROLE_KEY },
+                body: JSON.stringify({ videoId:b.videoId, frames:b.frames || [] }),
+              });
+              if (fr.ok) {
+                const data = await fr.json();
+                return { status: data.status || 'pending' };
+              }
+            } catch (_) { /* fail-closed */ }
+          }
+          const cnt = await cl.query(
+            `SELECT count(*)::int n FROM videos WHERE creator_id=$1 AND status='approved'`, [uid]);
+          if ((cnt.rows[0]?.n || 0) < need || check === 'review') {
+            await cl.query(`UPDATE videos SET status='under_review' WHERE id=$1`, [b.videoId]);
+            return { status: 'under_review', reason: check === 'review' ? 'word_review' : 'new_creator' };
+          }
+          await cl.query(`UPDATE videos SET status='approved' WHERE id=$1`, [b.videoId]);
+          return { status: 'approved' };
+        });
+        if (b.localId && db.videos[b.localId]) {
+          db.videos[b.localId].status = result.status;
+          store.commit();
+        }
+        return send(res, 200, result);
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // 👮 أدمن
+    if (p === '/api/safety/admin/is-admin' && method === 'GET') {
+      try {
+        const ok = await withUser((cl, uid) => cl.query('SELECT is_admin($1) a', [uid]).then(r => !!r.rows[0]?.a));
+        return send(res, 200, { admin: ok });
+      } catch (e) { return send(res, 200, { admin: false }); }
+    }
+    if (p === '/api/safety/admin/queue' && method === 'GET') {
+      try {
+        const r = await withUser((cl, uid) => cl.query('SELECT * FROM get_mod_queue($1,50)', [uid]));
+        return send(res, 200, { queue: r.rows });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/safety/admin/action' && method === 'POST') {
+      const b = await body(req);
+      try {
+        const out = await withUser((cl, uid) => cl.query('SELECT admin_action($1,$2,$3,$4) o',
+          [uid, b.reportId, b.action, b.note || '']).then(r => r.rows[0]?.o));
+        return send(res, 200, { ok: true, outcome: out });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/safety/admin/appeal' && method === 'POST') {
+      const b = await body(req);
+      try {
+        await withUser((cl, uid) => cl.query('SELECT admin_resolve_appeal($1,$2,$3)',
+          [uid, b.appealId, !!b.accept]));
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (p === '/api/safety/admin/appeals' && method === 'GET') {
+      try {
+        const r = await withUser((cl, uid) => cl.query(
+          `SELECT a.*,s.reason FROM appeals a JOIN strikes s ON s.id=a.strike_id
+           WHERE a.status='open' ORDER BY a.created_at LIMIT 50`));
+        return send(res, 200, { appeals: r.rows });
+      } catch (e) { return send(res, 200, { appeals: [] }); }
+    }
+    if (p === '/api/safety/admin/audit' && method === 'GET') {
+      try {
+        const r = await withUser((cl, uid) => cl.query(
+          'SELECT * FROM mod_audit ORDER BY created_at DESC LIMIT 50'));
+        return send(res, 200, { audit: r.rows });
+      } catch (e) { return send(res, 200, { audit: [] }); }
+    }
+    if (p === '/api/safety/admin/words' && method === 'GET') {
+      try {
+        const r = await pool.query('SELECT * FROM blocked_words ORDER BY term');
+        return send(res, 200, { words: r.rows });
+      } catch (e) { return send(res, 200, { words: [] }); }
+    }
+    if (p === '/api/safety/admin/words' && method === 'POST') {
+      const b = await body(req);
+      try {
+        await pool.query(`INSERT INTO blocked_words(term,action) VALUES($1,$2)
+          ON CONFLICT (term) DO UPDATE SET action=EXCLUDED.action`, [b.term, b.action || 'review']);
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (p.startsWith('/api/safety/admin/words/') && method === 'DELETE') {
+      try {
+        await pool.query('DELETE FROM blocked_words WHERE term=$1', [decodeURIComponent(p.split('/')[5])]);
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    // 🙈 مش مهتم → استبعاد من For You
+    const uidOfLocal = r => { const a = auth(r, db); return a ? numericId(a.user.id) : 0; };
+    if (p.startsWith('/api/videos/') && p.endsWith('/not-interested') && method === 'POST') {
+      try {
+        const raw = p.split('/')[3];
+        const pgId = /^\d+$/.test(raw) ? raw
+          : (db.videos[raw]?.pgId ? String(db.videos[raw].pgId) : null);
+        if (pgId) await pool.query('SELECT mark_not_interested($1,$2)', [uidOfLocal(req), pgId]);
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 200, { ok: true }); }
     }
   }
 
@@ -1171,6 +1403,7 @@ function publicVideo(v) {
     id: v.id, owner: v.owner, caption: v.caption, tags: v.tags,
     size: v.size, mime: v.mime, createdAt: v.createdAt,
     likes: v.likes.length, views: Object.keys(v.views).length,
+    pgId: v.pgId, status: v.status || 'approved',
     url: '/api/video/' + v.id,
   };
 }
