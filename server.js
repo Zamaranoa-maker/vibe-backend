@@ -35,20 +35,9 @@ function phase0Block(res, feature) {
   return send(res, 403, { error:'هذه الميزة غير متاحة في إصدار Phase 0', feature, phase:'free-launch' });
 }
 const dbLayer = require('./lib/db');
+const authSecure = require('./lib/auth-secure');
 
-/* ---------- يوزر + باسورد (scrypt، بدون مكتبات مدفوعة) ---------- */
-function hashPassword(pw) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(String(pw), salt, 64).toString('hex');
-  return salt + ':' + hash;
-}
-function verifyPassword(pw, stored) {
-  if (!stored || !stored.includes(':')) return false;
-  const [salt, hex] = stored.split(':');
-  const a = crypto.scryptSync(String(pw), salt, 64);
-  const b = Buffer.from(hex, 'hex');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
+/* ---------- يوزر + باسورد: lib/auth-secure.js ---------- */
 const walletDB = require('./lib/wallet-db');
 const billing = require('./lib/billing');
 store.load();
@@ -130,11 +119,23 @@ function parseMultipart(buf, boundary) {
   return result;
 }
 
-function auth(req, db) {
+function authJSON(req, db) {
   const h = req.headers.authorization || '';
   const token = h.startsWith('Bearer ') ? h.slice(7) : '';
   const user = db.users[token];
   return user ? { token, user } : null;
+}
+// الجلسات في DB (هاش التوكن) مع توافق مع الجلسات القديمة في JSON
+async function auth(req, db) {
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+  if (token && dbLayer.available) {
+    try {
+      const s = await authSecure.resolveSession(dbLayer.getPool(), token);
+      if (s) return { token, user: { ...(db.users[token] || {}), id: s.id, username: s.username } };
+    } catch (e) {}
+  }
+  return authJSON(req, db);
 }
 
 /* ---------- Routes ---------- */
@@ -164,61 +165,49 @@ async function route(req, res) {
 
   // تسجيل/دخول جهاز
   /* ─── يوزر + باسورد ─── */
+  const authErr = e => ({
+    INVALID_USERNAME: 'اليوزر لازم 3-20 حرف أو رقم أو . _',
+    WEAK_PASSWORD: 'الباسورد ضعيف: 8 حروف على الأقل، مش متكرر أو شائع',
+    TOO_MANY_ATTEMPTS: 'محاولات كتير — جرّب بعد 15 دقيقة',
+    BAD_CREDENTIALS: 'اليوزر أو الباسورد غلط',
+  }[e.message] || e.message);
+
   if (p === '/api/auth/register' && method === 'POST') {
     const b = await body(req);
-    const username = String(b.username || '').trim().slice(0, 30);
-    const pw = String(b.password || '');
-    if (!/^[\p{L}\p{N}_]{3,30}$/u.test(username)) return send(res, 400, { error: 'اليوزر من 3 لـ 30 حرف أو رقم أو _' });
-    if (pw.length < 6) return send(res, 400, { error: 'الباسورد على الأقل 6 حروف' });
     try {
-      if (dbLayer.available) {
-        const pool = dbLayer.getPool();
-        const exists = await pool.query('SELECT 1 FROM users WHERE username=$1 OR external_id=$1', [username]);
-        if (exists.rows.length) return send(res, 409, { error: 'اليوزر مستخدم قبل كده' });
-        const id = numericId(username);
-        await pool.query(`INSERT INTO users(id,username,external_id,status,password_hash)
-          VALUES($1,$2,$2,'active',$3)`, [id, username, hashPassword(pw)]);
-        await pool.query(`INSERT INTO profiles(id,username,display_name) VALUES($1,$2,$2)
-          ON CONFLICT (id) DO NOTHING`, [id, username]);
-      }
-      let found = Object.entries(db.users).find(([, v]) => v.deviceId === username);
-      let token = found ? found[0] : crypto.randomBytes(24).toString('hex');
-      if (!found) {
-        const user = { id: username, deviceId: username, createdAt: Date.now() };
-        db.users[token] = user;
-        db.stats.signups++;
-        wallet.ensure(username);
-        store.commit();
-      }
+      const username = authSecure.normalizeUsername(b.username);
+      authSecure.validatePassword(b.password, username);
+      if (!dbLayer.available) throw new Error('DB unavailable');
+      const pool = dbLayer.getPool();
+      const exists = await pool.query('SELECT 1 FROM users WHERE username=$1 OR external_id=$1', [username]);
+      if (exists.rows.length) return send(res, 409, { error: 'اليوزر مستخدم قبل كده' });
+      const id = numericId(username);
+      const hash = await authSecure.hashPassword(b.password);
+      await pool.query(`INSERT INTO users(id,username,external_id,status,password_hash)
+        VALUES($1,$2,$2,'active',$3)`, [id, username, hash]);
+      await pool.query(`INSERT INTO profiles(id,username,display_name) VALUES($1,$2,$2)
+        ON CONFLICT (id) DO NOTHING`, [id, username]);
+      const token = await authSecure.createSession(pool, id,
+        req.socket?.remoteAddress, req.headers['user-agent']);
+      db.users[token] = { id: username, deviceId: username, createdAt: Date.now() };
+      db.stats.signups++; wallet.ensure(username); store.commit();
       return send(res, 201, { token, user: { id: username, username }, isNew: true });
-    } catch (e) { return send(res, 400, { error: e.message }); }
+    } catch (e) { return send(res, 400, { error: authErr(e) }); }
   }
 
   if (p === '/api/auth/login' && method === 'POST') {
     const b = await body(req);
-    const username = String(b.username || '').trim().slice(0, 30);
-    const pw = String(b.password || '');
     try {
-      let ok = false, dbId = null;
-      if (dbLayer.available) {
-        const r = await dbLayer.getPool().query(
-          'SELECT id,password_hash FROM users WHERE username=$1', [username]);
-        if (r.rows[0]) { ok = verifyPassword(pw, r.rows[0].password_hash); dbId = r.rows[0].id; }
-      }
-      if (!ok) return send(res, 401, { error: 'اليوزر أو الباسورد غلط' });
-      let found = Object.entries(db.users).find(([, v]) => v.deviceId === username);
-      let token = found ? found[0] : crypto.randomBytes(24).toString('hex');
-      if (!found) {
-        db.users[token] = { id: username, deviceId: username, createdAt: Date.now() };
-        wallet.ensure(username);
-        store.commit();
-      }
-      return send(res, 200, { token, user: { id: username, username, dbId }, ok: true });
-    } catch (e) { return send(res, 400, { error: e.message }); }
+      if (!dbLayer.available) throw new Error('DB unavailable');
+      const r = await authSecure.login(dbLayer.getPool(), req, b.username, b.password);
+      db.users[r.token] = { id: r.username, deviceId: r.username, createdAt: Date.now() };
+      wallet.ensure(r.username); store.commit();
+      return send(res, 200, { token: r.token, user: { id: r.username, username: r.username, dbId: r.userId }, ok: true });
+    } catch (e) { return send(res, e.message === 'TOO_MANY_ATTEMPTS' ? 429 : 400, { error: authErr(e) }); }
   }
 
   if (p === '/api/auth/session' && method === 'GET') {
-    const a = auth(req, db);
+    const a = await auth(req, db);
     if (!a) return send(res, 200, { loggedIn: false });
     let admin = false, dbId = null, ageTier = null;
     if (dbLayer.available) {
@@ -253,13 +242,13 @@ async function route(req, res) {
 
   // ملفي
   if (p === '/api/me' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: ' unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: ' unauthorized' });
     return send(res, 200, { user: a.user, wallet: wallet.getWallet(a.user.id) });
   }
 
   // رفع فيديو (base64 JSON)
   if (p === '/api/videos' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const b = await body(req);
     if (!b.data) return send(res, 400, { error: 'data مطلوب' });
     const buf = Buffer.from(b.data, 'base64');
@@ -302,7 +291,7 @@ async function route(req, res) {
 
   // liste الفيديوهات — For You v1 ranking
   if (p === '/api/videos' && method === 'GET') {
-    const a = auth(req, db);
+    const a = await auth(req, db);
     // 🚀 لو Postgres متصل: استخدم دوال الـ ranking الحقيقية
     if (dbLayer.available && u.searchParams.get('feed') === 'foryou' && a) {
       try {
@@ -358,7 +347,7 @@ async function route(req, res) {
 
   // 🚨 إبلاغ عن فيديو (إبلاغين = إخفاء تلقائي للمراجعة)
   if (p.startsWith('/api/videos/') && p.endsWith('/report') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[3];
     if (!db.videos[id]) return send(res, 404, { error: 'not found' });
     const b = await body(req);
@@ -406,7 +395,7 @@ async function route(req, res) {
 
   // تسجيل مشاهدة (مع مكافأة)
   if (p.startsWith('/api/videos/') && p.endsWith('/view') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[3];
     const v = db.videos[id];
     if (!v) return send(res, 404, { error: 'not found' });
@@ -431,7 +420,7 @@ async function route(req, res) {
 
   // إعجاب
   if (p.startsWith('/api/videos/') && p.endsWith('/like') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[3];
     const v = db.videos[id]; if (!v) return send(res, 404, { error: 'not found' });
     const i = v.likes.indexOf(a.user.id);
@@ -443,13 +432,13 @@ async function route(req, res) {
 
   // المحفظة والسجل
   if (p === '/api/wallet' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     return send(res, 200, { wallet: wallet.getWallet(a.user.id), history: wallet.history(a.user.id) });
   }
 
   // مكافأة يومية
   if (p === '/api/wallet/claim' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const w = db.wallet[a.user.id];
     const today = wallet.todayKey();
     if (w.claimedDaily === today) {
@@ -462,7 +451,7 @@ async function route(req, res) {
 
   // 🎙️ رفع تعليق صوتي (rate limit 20/دقيقة + حظر + pending + طابور مراجعة)
   if (p.startsWith('/api/videos/') && p.endsWith('/voice-comments') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     if ((db.blockedUsers||{})[a.user.id]) return send(res, 403, { error: 'حسابك محظور بسبب إساءة' });
     const id = p.split('/')[3];
     if (!db.videos[id]) return send(res, 404, { error: 'not found' });
@@ -520,7 +509,7 @@ async function route(req, res) {
   // 🎙️ عرض التعليقات (ماعدا المحذوفة / المرفوضة؛ والصاحب يشوف pending بتاعه)
   if (p.startsWith('/api/videos/') && p.endsWith('/voice-comments') && method === 'GET') {
     const id = p.split('/')[3];
-    const a = auth(req, db);
+    const a = await auth(req, db);
     const myId = a ? a.user.id : null;
     const list = (db.voiceComments || {})[id] || [];
     const visible = list.filter(c =>
@@ -536,7 +525,7 @@ async function route(req, res) {
   // 🎙️ حذف تعليق صوتي (الصاحب أو صاحب الفيديو)
   if (p.startsWith('/api/videos/') && p.endsWith('/voice-comments/') && method === 'DELETE' &&
       p.split('/').length === 7) {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const parts = p.split('/'); const id = parts[3], cid = parts[5];
     const video = db.videos[id]; if (!video) return send(res, 404, { error: 'not found' });
     const list = (db.voiceComments||{})[id] || [];
@@ -551,7 +540,7 @@ async function route(req, res) {
   // 🎙️ إبلاغ عن تعليق صوتي (3 بلاغات = حظر تلقائي)
   if (p.startsWith('/api/videos/') && p.endsWith('/report') && method === 'POST' &&
       p.includes('/voice-comments/')) {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const parts = p.split('/'); const id = parts[3], cid = parts[5];
     const list = (db.voiceComments||{})[id] || [];
     const c = list.find(x => x.id === cid); if (!c) return send(res, 404, { error: 'not found' });
@@ -566,7 +555,7 @@ async function route(req, res) {
 
   // 🎙️ تفعيل/تعطيل التعليقات الصوتية (صاحب الفيديو بس)
   if (p.startsWith('/api/videos/') && p.endsWith('/voice-settings') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[3];
     const video = db.videos[id]; if (!video) return send(res, 404, { error: 'not found' });
     if (video.owner !== a.user.id) return send(res, 403, { error: 'مش مسموح لك' });
@@ -604,7 +593,7 @@ async function route(req, res) {
       return send(res, 404, { error: 'not found' });
     // الصاحب يقدر يسمع تعليقه_pending بالـ token في query (لأن <audio> ما بيبعتش header)
     const qToken = u.searchParams.get('token');
-    const a = auth(req, db) || (qToken ? { user: db.users[qToken] } : null);
+    const a = await auth(req, db) || (qToken ? { user: db.users[qToken] } : null);
     if (found.status === 'pending' && (!a?.user || a.user.id !== found.userId))
       return send(res, 403, { error: 'قيد المراجعة' });
     const f = path.join(VIDEO_DIR, found.file);
@@ -617,7 +606,7 @@ async function route(req, res) {
 
   // 💡 حالة المهمة اليومية
   if (p === '/api/task/status' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const t = wallet.todayKey();
     const tk = db.tasks || (db.tasks = {});
     const rec = tk[a.user.id]?.date === t ? tk[a.user.id] : { date: t, watched: 0, claimedBonus: false };
@@ -635,7 +624,7 @@ async function route(req, res) {
 
   // 💡 مشاهدة إعلان ضمن المهمة اليومية ( أدمن يكسب from الإعلان + المستخدم يكسب مكافأة )
   if (p === '/api/task/watch' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const t = wallet.todayKey();
     const tk = db.tasks || (db.tasks = {});
     let rec = tk[a.user.id]?.date === t ? tk[a.user.id] : { date: t, watched: 0, claimedBonus: false };
@@ -665,7 +654,7 @@ async function route(req, res) {
 
   // إعلان (محاكاة دخل) — عشان نحسب if الربح يغطي المصروف
   if (p === '/api/ads/impression' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const b = await body(req);
     const type = ['banner','interstitial','rewarded'].includes(b.type) ? b.type : 'interstitial';
     const price = db.config.adPrices[type] || db.config.adRevenuePerView;
@@ -681,7 +670,7 @@ async function route(req, res) {
   /* ═══════════════════ SEARCH / HASHTAGS / TRENDING ═══════════════════ */
   if (dbLayer.available) {
     const pool = dbLayer.getPool();
-    const uidOf = req => { const a = auth(req, db); return a ? numericId(a.user.id) : 0; };
+    const uidOf = req => { const a = authJSON(req, db); return a ? numericId(a.user.id) : 0; };
 
     if (p === '/api/search' && method === 'GET') {
       const q = u.searchParams.get('q') || '';
@@ -751,7 +740,7 @@ async function route(req, res) {
     const withUser = async (fn) => {
       const client = await pool.connect();
       try {
-        const a = auth(req, db);
+        const a = await auth(req, db);
         await client.query('SELECT set_config($1,$2,false)', ['app.user', String(a ? a.user.id : '')]);
         return await fn(client, a ? numericId(a.user.id) : 0, a);
       } finally { client.release(); }
@@ -769,7 +758,7 @@ async function route(req, res) {
     // بوابة العمر
     if (p === '/api/safety/birthdate' && method === 'POST') {
       const b = await body(req);
-      const acc = auth(req, db);
+      const acc = await auth(req, db);
       try {
         let realUid = 0;
         if (acc) {
@@ -975,14 +964,14 @@ async function route(req, res) {
 
   // 🎟️ كود الدعوة + الشارات
   if (p === '/api/growth/me' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    const a = await auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
     db.growth = db.growth || {};
     const g = db.growth[a.user.id] || (db.growth[a.user.id]={code:growth.makeCode(a.user.id),invites:0,badges:['founding']});
     return send(res,200,{code:g.code,invites:g.invites,badges:g.badges,shareUrl:'https://vibe.app/i/'+g.code});
   }
   // تفعيل كود دعوة (بشرط تسجيل جديد) — المكافأة شارة بس
   if (p === '/api/growth/redeem' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    const a = await auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
     const b = await body(req); const code = String(b.code||'').toUpperCase();
     const owner = Object.entries(db.growth||{}).find(([,g])=>g.code===code);
     if (!owner || owner[0]===a.user.id) return send(res,400,{error:'كود غير صالح'});
@@ -1011,7 +1000,7 @@ async function route(req, res) {
 
   // 💰 رصيد المستخدم
   if (p === '/api/economy/wallet' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const w = ensureCoins(db, a.user.id);
     return send(res, 200, { ...w, level:eco.supporterLevel(w.gifted),
       limits:(db.spendingLimits||{})[a.user.id]||{daily:500,monthly:2000} });
@@ -1019,7 +1008,7 @@ async function route(req, res) {
 
   // 🛒 شراء (Google Play Billing — تحقق من الإيصال)
   if (p === '/api/economy/purchase' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const prof = (db.userProfiles||{})[a.user.id];
     const band = prof?.ageBand || '18+';
     if (!eco.canPurchase(band)) return send(res, 403, { error:'الشراء متاح للبالغين 18+ بس' });
@@ -1044,14 +1033,14 @@ async function route(req, res) {
 
   // ↩️ استعادة المشتريات
   if (p === '/api/economy/restore' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const mine = (db.purchases||[]).filter(x=>x.userId===a.user.id&&x.status==='verified');
     return send(res, 200, { purchases:mine.map(({receipt,...r})=>r) });
   }
 
   // 🎁 إرسال هدية (فيديو أو لايف)
   if (p === '/api/economy/gift' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     // 🗄️ لو Postgres متصل: استخدم الـ ledger الثابت
     if (dbLayer.available) {
       try {
@@ -1112,7 +1101,7 @@ async function route(req, res) {
 
   // 🔴 لايف (18+ و100 متابع)
   if (p === '/api/economy/live/start' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const prof = (db.userProfiles||{})[a.user.id];
     const followers = 100; // مبسّط — من social
     if (!eco.canHostLive(prof?.ageBand||'18+', followers)) return send(res, 403, { error:'اللايف محتاج 18+ و100 متابع' });
@@ -1124,7 +1113,7 @@ async function route(req, res) {
     store.commit(); return send(res, 200, { ok:true, id });
   }
   if (p.startsWith('/api/economy/live/') && p.endsWith('/end') && method === 'POST') {
-    const id = p.split('/')[4], a = auth(req, db);
+    const id = p.split('/')[4], a = await auth(req, db);
     const lv = (db.lives||{})[id]; if(!lv) return send(res,404,{error:'not found'});
     if (lv.host!==a?.user?.id) return send(res,403,{error:'مش مسموح'});
     lv.status='ended'; lv.endedAt=Date.now(); store.commit();
@@ -1138,7 +1127,7 @@ async function route(req, res) {
 
   // 💳 حدود الإنفاق + السجل
   if (p === '/api/economy/limits' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    const a = await auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
     const b = await body(req);
     db.spendingLimits = db.spendingLimits||{};
     db.spendingLimits[a.user.id] = {
@@ -1147,14 +1136,14 @@ async function route(req, res) {
     store.commit(); return send(res,200,{ok:true});
   }
   if (p === '/api/economy/history' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    const a = await auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
     return send(res, 200, {
       purchases:(db.purchases||[]).filter(x=>x.userId===a.user.id).map(({receipt,...r})=>r),
       gifts:(db.giftTx||[]).filter(x=>x.from===a.user.id),
       refunds:(db.refunds||[]).filter(x=>x.userId===a.user.id) });
   }
   if (p === '/api/economy/refund' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
+    const a = await auth(req, db); if (!a) return send(res,401,{error:'unauthorized'});
     const b = await body(req);
     const pu = (db.purchases||[]).find(x=>x.id===b.purchaseId&&x.userId===a.user.id);
     if (!pu) return send(res,404,{error:'not found'});
@@ -1184,7 +1173,7 @@ async function route(req, res) {
     return send(res, 200, { ok:true, band, rules:safety.TIER_RULES[band] });
   }
   if (p === '/api/safety/age' && method === 'GET') {
-    const a = auth(req, db);
+    const a = await auth(req, db);
     const prof = (db.userProfiles||{})[a?.user?.id] || null;
     return send(res, 200, { profile:prof, rules:prof?safety.TIER_RULES[prof.ageBand]:null });
   }
@@ -1198,7 +1187,7 @@ async function route(req, res) {
 
   // 🚨 بلاغ عام (فيديو/تعليق/صوتي/بروفايل/لايف/رسالة) بأولوية طفل
   if (p === '/api/safety/report' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const b = await body(req);
     const reason = String(b.reason||'other');
     const childPriority = safety.isSevere(reason) || ['csam','grooming'].includes(reason);
@@ -1214,11 +1203,11 @@ async function route(req, res) {
 
   // ⚖️ عقوبات/درجات (داخلي + استئناف)
   if (p === '/api/safety/strikes' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     return send(res, 200, { strikes:(db.strikes||{})[a.user.id]||{strikes:0,status:'active'}, policy:safety.POLICY });
   }
   if (p === '/api/safety/appeal' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const b = await body(req);
     db.appeals = db.appeals||[];
     db.appeals.push({ id:'ap_'+Date.now().toString(36), userId:a.user.id,
@@ -1288,7 +1277,7 @@ async function route(req, res) {
 
   // 👤 تحليلات الصانع (من الـ aggregates المحسوبة)
   if (p === '/api/creator/analytics' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const agg = (db.aggregates||{})[a.user.id] || emptyAgg();
     const mine = Object.values(db.videos).filter(v => v.owner === a.user.id);
     const perVideo = mine.map(v => {
@@ -1304,7 +1293,7 @@ async function route(req, res) {
 
   // 📄 تصدير CSV
   if (p === '/api/creator/analytics.csv' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const mine = Object.values(db.videos).filter(v => v.owner === a.user.id);
     let csv = 'video_id,caption,views,avg_watched_pct,watch_time_s,likes,shares\n';
     for (const v of mine) {
@@ -1319,7 +1308,7 @@ async function route(req, res) {
 
   // 📅 جدولة بوست
   if (p === '/api/creator/schedule' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const b = await body(req);
     if (!b.file || !b.publishAt) return send(res, 400, { error: 'ملف ووقت مطلوبين' });
     const when = new Date(b.publishAt).getTime();
@@ -1331,18 +1320,18 @@ async function route(req, res) {
     return send(res, 201, { ok:true, job:{id:j.id,publishAt:j.publishAt,status:j.status} });
   }
   if (p === '/api/creator/schedule' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     return send(res, 200, { jobs:(db.scheduled||[]).filter(x=>x.userId===a.user.id)
       .map(({data,...rest})=>rest) });
   }
   if (p.startsWith('/api/creator/schedule/') && method === 'DELETE') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[4];
     db.scheduled = (db.scheduled||[]).filter(x=>!(x.id===id&&x.userId===a.user.id));
     store.commit(); return send(res, 200, { ok:true });
   }
   if (p.startsWith('/api/creator/schedule/') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[4], b = await body(req);
     const j = (db.scheduled||[]).find(x=>x.id===id&&x.userId===a.user.id);
     if (!j) return send(res, 404, { error:'not found' });
@@ -1353,11 +1342,11 @@ async function route(req, res) {
 
   // ✏️ المسودات
   if (p === '/api/creator/drafts' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     return send(res, 200, { drafts:(db.drafts||{})[a.user.id]||[] });
   }
   if (p === '/api/creator/drafts' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const b = await body(req);
     db.drafts = db.drafts || {};
     const list = db.drafts[a.user.id] || (db.drafts[a.user.id] = []);
@@ -1368,7 +1357,7 @@ async function route(req, res) {
     store.commit(); return send(res, 200, { ok:true, draft:{id:d.id,updatedAt:d.updatedAt} });
   }
   if (p.startsWith('/api/creator/drafts/') && method === 'DELETE') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[4];
     db.drafts[a.user.id] = ((db.drafts||{})[a.user.id]||[]).filter(x=>x.id!==id);
     store.commit(); return send(res, 200, { ok:true });
@@ -1376,7 +1365,7 @@ async function route(req, res) {
 
   // 💰 الأرباح والسحب
   if (p === '/api/creator/earnings' && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const w = (db.wallet||{})[a.user.id]||{balance:0,totalEarned:0};
     const perVideo = Object.values(db.videos).filter(v=>v.owner===a.user.id).map(v=>({
       id:v.id, caption:v.caption, earned:Math.round(((v.analytics||{}).earned||0)*100)/100 }));
@@ -1385,7 +1374,7 @@ async function route(req, res) {
       minPayout:20 });
   }
   if (p === '/api/creator/payout' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const b = await body(req), amount = Number(b.amount), MIN=20;
     const w = (db.wallet||{})[a.user.id];
     if (!w || w.balance < MIN) return send(res, 400, { error: 'الحد الأدنى للسحب '+MIN+' ج.م' });
@@ -1400,7 +1389,7 @@ async function route(req, res) {
 
   // 🖼️ A/B test للغلاف
   if (p.startsWith('/api/creator/ab/') && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[4], b = await body(req);
     const v = db.videos[id]; if (!v || v.owner!==a.user.id) return send(res, 403, { error:'مش مسموح' });
     db.abTests = db.abTests||{};
@@ -1408,7 +1397,7 @@ async function route(req, res) {
     store.commit(); return send(res, 200, { ok:true });
   }
   if (p.startsWith('/api/creator/ab/') && p.endsWith('/assign') && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[4], t = (db.abTests||{})[id];
     if (!t || t.covers.length<2) return send(res, 200, { cover:null });
     const key = t.winner ? (t.winner==='a'?0:1) : (Math.random()<0.5?0:1);
@@ -1422,7 +1411,7 @@ async function route(req, res) {
 
   // ⬇️ تنزيل فيديو (الصانع ينزّل بتاعه نظيف / الغير بس لو مسموح + كريديت)
   if (p.startsWith('/api/download/') && method === 'GET') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
     const id = p.split('/')[3], v = db.videos[id];
     if (!v) return send(res, 404, { error:'not found' });
     const own = v.owner===a.user.id;
@@ -1437,7 +1426,7 @@ async function route(req, res) {
     fs.createReadStream(f).pipe(res); return;
   }
   if (p === '/api/creator/settings' && method === 'POST') {
-    const a = auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
+    const a = await auth(req, db); if (!a) return send(res, 401, { error:'unauthorized' });
     const b = await body(req);
     db.creatorSettings = db.creatorSettings||{};
     db.creatorSettings[a.user.id] = { allowDownloads:!!b.allowDownloads };
