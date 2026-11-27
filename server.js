@@ -232,6 +232,88 @@ async function route(req, res) {
     } catch (e) { return e.message === 'TOO_MANY_ATTEMPTS' ? rateLimited(res, e) : send(res, 400, { error: authErr(e) }); }
   }
 
+  // فحص توفر اليوزر (لـ onboarding) — ما بيكشفش بيانات حسابات تانية
+  if (p === '/api/auth/check-username' && method === 'GET') {
+    try {
+      const name = authSecure.normalizeUsername(u.searchParams.get('u') || '');
+      const r = await dbLayer.getPool().query('SELECT 1 FROM users WHERE username=$1', [name]);
+      const ok = r.rows.length === 0;
+      const base = name.replace(/\d+$/, '').slice(0, 15);
+      const suggestions = ok ? [] : [base + Math.floor(Math.random()*900+100), base + '_' + Math.floor(Math.random()*90+10)];
+      return send(res, 200, { ok, username: name, suggestions });
+    } catch (e) { return send(res, 400, { error: authErr(e) }); }
+  }
+
+  // اهتمامات Onboarding (For You)
+  if (p === '/api/me/interests' && method === 'POST') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const b = await body(req);
+    try {
+      const cats = (Array.isArray(b.categories) ? b.categories : []).slice(0, 10);
+      for (const cat of cats) await dbLayer.getPool().query(
+        `INSERT INTO user_interests(user_id,category,weight) VALUES($1,$2,1.5)
+         ON CONFLICT (user_id,category) DO UPDATE SET weight=greatest(user_interests.weight,1.5)`,
+        [numericId(a.user.id), String(cat).slice(0,40)]);
+      return send(res, 200, { ok: true, count: cats.length });
+    } catch (e) { return send(res, 200, { ok: false }); }
+  }
+
+  // اختيار يوزر بعد Google Sign-In
+  if (p === '/api/auth/set-username' && method === 'POST') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const b = await body(req);
+    try {
+      const name = authSecure.normalizeUsername(b.username);
+      const pool = dbLayer.getPool();
+      const me = await pool.query('SELECT id FROM users WHERE external_id=$1', [String(a.user.id)]);
+      if (!me.rows[0]) return send(res, 400, { error: 'AUTH' });
+      const taken = await pool.query('SELECT id FROM users WHERE username=$1 AND id<>$2', [name, me.rows[0].id]);
+      if (taken.rows.length) return send(res, 409, { error: 'اليوزر مستخدم' });
+      await pool.query('UPDATE users SET username=$1 WHERE id=$2', [name, me.rows[0].id]);
+      await pool.query('UPDATE profiles SET username=$1,display_name=$1 WHERE id=$2', [name, me.rows[0].id]);
+      return send(res, 200, { ok: true, username: name });
+    } catch (e) { return send(res, 400, { error: authErr(e) }); }
+  }
+
+  // إعدادات عامة غير سرية (لعميل Google Sign-In)
+  if (p === '/api/config' && method === 'GET') {
+    return send(res, 200, { googleClientId: process.env.GOOGLE_CLIENT_ID || '' });
+  }
+
+  // Google Sign-In: تحقق من ID token عند Google، ثم نفس جدول الجلسات
+  if (p === '/api/auth/google' && method === 'POST') {
+    const b = await body(req);
+    try {
+      if (!process.env.GOOGLE_CLIENT_ID) throw new Error('GOOGLE_NOT_CONFIGURED');
+      if (!b.idToken) throw new Error('BAD_CREDENTIALS');
+      const vr = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(b.idToken));
+      const info = await vr.json();
+      if (!vr.ok || info.aud !== process.env.GOOGLE_CLIENT_ID || !info.email_verified)
+        throw new Error('BAD_CREDENTIALS');
+      const pool = dbLayer.getPool();
+      const ext = 'google_' + info.sub;
+      let row = await pool.query('SELECT id,external_id,status FROM users WHERE external_id=$1', [ext]);
+      if (!row.rows[0]) {
+        let name;
+        try { name = authSecure.normalizeUsername(String(info.email || '').split('@')[0].replace(/[^a-z0-9_.]/gi,'')); }
+        catch (e) { name = 'user' + Math.floor(Math.random()*900+100); }
+        const taken = await pool.query('SELECT 1 FROM users WHERE username=$1', [name]);
+        if (taken.rows.length) name = (name + Math.floor(Math.random()*900+100)).slice(0,20);
+        const id = numericId(ext);
+        await pool.query(`INSERT INTO users(id,external_id,username,email,email_verified,status)
+          VALUES($1,$2,$3,$4,true,'active')`, [id, ext, name, info.email]);
+        await pool.query(`INSERT INTO profiles(id,username,display_name) VALUES($1,$2,$2)
+          ON CONFLICT (id) DO NOTHING`, [id, name]);
+        row = await pool.query('SELECT id,external_id,status FROM users WHERE id=$1', [id]);
+      }
+      const uid = row.rows[0].id;
+      const token = await authSecure.createSession(pool, uid, req, b.deviceId);
+      db.users[token] = { id: row.rows[0].external_id, deviceId: row.rows[0].external_id, createdAt: Date.now() };
+      wallet.ensure(row.rows[0].external_id); store.commit();
+      return send(res, 200, { token, user: { id: row.rows[0].external_id, username: row.rows[0].external_id }, needUsername: !row.rows[0].username });
+    } catch (e) { return send(res, 400, { error: e.message === 'GOOGLE_NOT_CONFIGURED' ? 'Google NOT CONFIGURED' : authErr(e) }); }
+  }
+
   if (p === '/api/auth/session' && method === 'GET') {
     const a = await auth(req, db);
     if (!a) return send(res, 200, { loggedIn: false });
