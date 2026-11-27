@@ -9,7 +9,7 @@ test('العمر من تاريخ الميلاد', () => {
   assert.equal(S.ageFromDOB('2013-12-01', now), 12);
   assert.equal(S.ageFromDOB('2011-11-26', now), 15);
   assert.equal(S.ageFromDOB('2008-11-26', now), 18);
-  assert.equal(S.ageFromDOB('不属于日期', now), null);
+  assert.equal(S.ageFromDOB('not-a-date', now), null);
 });
 
 test('الفئات العمرية', () => {
