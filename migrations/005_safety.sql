@@ -217,6 +217,7 @@ create or replace function apply_strike(
 ) returns text language plpgsql security definer set search_path=public as $$
 declare n int; outcome text;
 begin
+  if p_admin is null or not is_admin(p_admin) then raise exception 'FORBIDDEN'; end if;
   insert into strikes(user_id,severity,reason,report_id,issued_by,expires_at)
   values (p_user,p_severity,p_reason,p_report,p_admin,
     now()+((safety_cfg('strike_expiry_days'))::int||' days')::interval);
@@ -280,13 +281,16 @@ end $$;
 create or replace function get_mod_queue(p_admin bigint,p_limit int default 30)
 returns table(target_type text,target_id text,target_owner bigint,reasons text[],reports int,
               top_priority smallint,oldest timestamptz,report_id bigint)
-language sql stable security definer set search_path=public as $$
-  select r.target_type,r.target_id,max(r.target_owner),array_agg(distinct r.reason),
-    count(*)::int,min(r.priority),min(r.created_at),min(r.id)
-  from reports r where is_admin(p_admin) and r.status='open'
-  group by r.target_type,r.target_id
-  order by min(r.priority),count(*) desc,min(r.created_at) limit least(p_limit,100)
-$$;
+language plpgsql stable security definer set search_path=public as $$
+begin
+  if not is_admin(p_admin) then raise exception 'FORBIDDEN'; end if;
+  return query
+    select r.target_type,r.target_id,max(r.target_owner),array_agg(distinct r.reason),
+      count(*)::int,min(r.priority),min(r.created_at),min(r.id)
+    from reports r where r.status='open'
+    group by r.target_type,r.target_id
+    order by min(r.priority),count(*) desc,min(r.created_at) limit least(p_limit,100);
+end $$;
 
 -- استئناف
 create or replace function submit_appeal(p_user bigint,p_strike bigint,p_message text) returns void

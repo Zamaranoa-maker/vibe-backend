@@ -70,7 +70,7 @@ function send(res, code, data, type = 'application/json; charset=utf-8') {
   res.writeHead(code, { 'Content-Type': type });
   res.end(Buffer.isBuffer(data) ? data : (typeof data === 'string' ? data : JSON.stringify(data)));
 }
-function body(req, limit = 60 * 1024 * 1024) {
+function body(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -140,6 +140,14 @@ async function auth(req, db) {
 
 /* ---------- Routes ---------- */
 async function route(req, res) {
+  // خلف proxy: استخدم X-Forwarded-For بس لما نكون واثقين من الإعداد
+  req.clientIp = (process.env.TRUST_PROXY === '1'
+    ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    : '') || req.socket.remoteAddress || '';
+  // HTTPS إجباري في الإنتاج
+  if (process.env.NODE_ENV === 'production' &&
+      String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim() !== 'https')
+    return send(res, 403, { error: 'HTTPS required' });
   sec.cors(req, res);
   if (!limiter(req, res, () => {})) return;
   if (req.method === 'OPTIONS') {
@@ -172,38 +180,56 @@ async function route(req, res) {
     BAD_CREDENTIALS: 'اليوزر أو الباسورد غلط',
   }[e.message] || e.message);
 
+  const rateLimited = (res, e) => {
+    sec.secureHeaders(res);
+    res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': '900' });
+    res.end(JSON.stringify({ error: authErr(e) }));
+  };
+
   if (p === '/api/auth/register' && method === 'POST') {
     const b = await body(req);
     try {
-      const username = authSecure.normalizeUsername(b.username);
-      authSecure.validatePassword(b.password, username);
       if (!dbLayer.available) throw new Error('DB unavailable');
       const pool = dbLayer.getPool();
+      await authSecure.checkRegisterAllowed(pool, req.socket?.remoteAddress);
+      await authSecure.logRegisterAttempt(pool, req.socket?.remoteAddress);
+      let username, hash;
+      try {
+        username = authSecure.normalizeUsername(b.username);
+        authSecure.validatePassword(b.password, username);
+        hash = await authSecure.hashPassword(b.password);
+      } catch (e) {
+        await authSecure.logRegisterAttempt(pool, req.socket?.remoteAddress);
+        throw e;
+      }
       const exists = await pool.query('SELECT 1 FROM users WHERE username=$1 OR external_id=$1', [username]);
-      if (exists.rows.length) return send(res, 409, { error: 'اليوزر مستخدم قبل كده' });
+      if (exists.rows.length) {
+        await authSecure.verifyPassword(String(b.password || ''), await authSecure.hashPassword('dummy-for-timing'));
+        return send(res, 400, { error: 'تعذّر إنشاء الحساب — جرّب اسم تاني' });  // مفيش كشف لوجود اليوزر
+      }
       const id = numericId(username);
-      const hash = await authSecure.hashPassword(b.password);
       await pool.query(`INSERT INTO users(id,username,external_id,status,password_hash)
         VALUES($1,$2,$2,'active',$3)`, [id, username, hash]);
       await pool.query(`INSERT INTO profiles(id,username,display_name) VALUES($1,$2,$2)
         ON CONFLICT (id) DO NOTHING`, [id, username]);
-      const token = await authSecure.createSession(pool, id,
-        req.socket?.remoteAddress, req.headers['user-agent']);
+      const token = await authSecure.createSession(pool, id, req, b.deviceId);
       db.users[token] = { id: username, deviceId: username, createdAt: Date.now() };
       db.stats.signups++; wallet.ensure(username); store.commit();
       return send(res, 201, { token, user: { id: username, username }, isNew: true });
-    } catch (e) { return send(res, 400, { error: authErr(e) }); }
+    } catch (e) { return e.message === 'TOO_MANY_ATTEMPTS' ? rateLimited(res, e) : send(res, 400, { error: authErr(e) }); }
   }
 
   if (p === '/api/auth/login' && method === 'POST') {
     const b = await body(req);
     try {
       if (!dbLayer.available) throw new Error('DB unavailable');
-      const r = await authSecure.login(dbLayer.getPool(), req, b.username, b.password);
+      const r = await authSecure.login(dbLayer.getPool(), req, b.username, b.password, b.deviceId);
       db.users[r.token] = { id: r.username, deviceId: r.username, createdAt: Date.now() };
       wallet.ensure(r.username); store.commit();
-      return send(res, 200, { token: r.token, user: { id: r.username, username: r.username, dbId: r.userId }, ok: true });
-    } catch (e) { return send(res, e.message === 'TOO_MANY_ATTEMPTS' ? 429 : 400, { error: authErr(e) }); }
+      const out = { token: r.token, user: { id: r.username, username: r.username, dbId: r.userId }, ok: true };
+      if (r.mustChange) out.mustChangePassword = true;
+      return send(res, 200, out);
+    } catch (e) { return e.message === 'TOO_MANY_ATTEMPTS' ? rateLimited(res, e) : send(res, 400, { error: authErr(e) }); }
   }
 
   if (p === '/api/auth/session' && method === 'GET') {
@@ -219,6 +245,97 @@ async function route(req, res) {
       } catch (e) {}
     }
     return send(res, 200, { loggedIn: true, user: { id: a.user.id, username: a.user.id }, dbId, admin, ageTier });
+  }
+
+  /* ─── إدارة الأجهزة والجلسات ─── */
+  const myDbId = async a => {
+    if (!dbLayer.available || !a) return null;
+    const r = await dbLayer.getPool().query('SELECT id FROM users WHERE external_id=$1', [String(a.user.id)]);
+    return r.rows[0]?.id || null;
+  };
+  const tokenOf = req => (req.headers.authorization || '').replace(/^Bearer /, '');
+
+  if (p === '/api/auth/devices' && method === 'GET') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    try {
+      const id = await myDbId(a);
+      const r = await authSecure.listSessions(dbLayer.getPool(), id);
+      return send(res, 200, { devices: r.rows });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/auth/logout' && method === 'POST') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    try {
+      const id = await myDbId(a);
+      await authSecure.revokeSession(dbLayer.getPool(), id, tokenOf(req));
+      const tok = tokenOf(req); delete db.users[tok]; store.commit();
+      return send(res, 200, { ok: true });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/auth/logout-all' && method === 'POST') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    try {
+      const id = await myDbId(a);
+      await authSecure.revokeAllSessions(dbLayer.getPool(), id);
+      for (const [t, v] of Object.entries(db.users)) if (v.id === a.user.id) delete db.users[t];
+      store.commit();
+      return send(res, 200, { ok: true });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/auth/change-password' && method === 'POST') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const b = await body(req);
+    try {
+      const id = await myDbId(a);
+      await authSecure.changePassword(dbLayer.getPool(), id, b.currentPassword, b.newPassword, tokenOf(req));
+      // امسح الجلسات القديمة من التخزين المحلي كمان (else auth() هيرجعهم)
+      const cur = tokenOf(req);
+      for (const [t, v] of Object.entries(db.users)) if (v.id === a.user.id && t !== cur) delete db.users[t];
+      store.commit();
+      return send(res, 200, { ok: true });
+    } catch (e) { return send(res, 400, { error: authErr(e) }); }
+  }
+
+  /* ─── استرداد اختياري بالإيميل (OTP، 10 دقائق، استخدام واحد) ─── */
+  if (p === '/api/auth/recovery/request' && method === 'POST') {
+    const b = await body(req);
+    try {
+      const pool = dbLayer.getPool();
+      const norm = authSecure.normalizeUsername(b.username);
+      const r = await pool.query('SELECT id,email,email_verified FROM users WHERE username=$1', [norm]);
+      // نفس الاستجابة سواء اليوزر موجود أو له إيميل أو لأ — مفيش enumeration
+      if (r.rows[0]?.email_verified && r.rows[0]?.email) {
+        const code = await authSecure.requestRecovery(pool, r.rows[0].id);
+        if (process.env.RESEND_API_KEY) {
+          try {
+            await fetch('https://api.resend.com/emails', {
+              method:'POST',
+              headers:{ Authorization:'Bearer '+process.env.RESEND_API_KEY, 'Content-Type':'application/json' },
+              body: JSON.stringify({ from: process.env.RECOVERY_FROM_EMAIL || 'VIBE+ <onboarding@resend.dev>',
+                to: r.rows[0].email, subject:'كود استعادة حساب ڨايب بلس',
+                text:`كود الاستعادة بتاعك: ${code} (صالح 10 دقائق)` }),
+            });
+          } catch (e) {}
+        }
+      } else { await authSecure.requestRecovery(pool, 0).catch(()=>{}); }
+      return send(res, 200, { ok: true });
+    } catch (e) { return send(res, 200, { ok: true }); }
+  }
+  if (p === '/api/auth/recovery/verify' && method === 'POST') {
+    const b = await body(req);
+    try {
+      const pool = dbLayer.getPool();
+      const norm = authSecure.normalizeUsername(b.username);
+      const r = await pool.query('SELECT id FROM users WHERE username=$1', [norm]);
+      if (!r.rows[0]) { await authSecure.verifyRecovery(pool, 0, '000000').catch(()=>{}); throw new Error('BAD_CODE'); }
+      const id = r.rows[0].id;
+      await authSecure.verifyRecovery(pool, id, b.code);
+      const hash = await authSecure.hashPassword(b.newPassword);
+      authSecure.validatePassword(b.newPassword, norm);
+      await pool.query('UPDATE users SET password_hash=$1,must_change_password=false WHERE id=$2', [hash, id]);
+      await authSecure.revokeAllSessions(pool, id);
+      return send(res, 200, { ok: true });
+    } catch (e) { return send(res, 400, { error: e.message === 'BAD_CODE' ? 'الكود غلط أو منتهي' : authErr(e) }); }
   }
 
   if (p === '/api/auth' && method === 'POST') {
@@ -249,7 +366,7 @@ async function route(req, res) {
   // رفع فيديو (base64 JSON)
   if (p === '/api/videos' && method === 'POST') {
     const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
-    const b = await body(req);
+    const b = await body(req, 40 * 1024 * 1024);   // رفع فيديو (base64)
     if (!b.data) return send(res, 400, { error: 'data مطلوب' });
     const buf = Buffer.from(b.data, 'base64');
     if (buf.length > 25 * 1024 * 1024) return send(res, 400, { error: 'الفيديو كبير جداً (أقصى 25MB)' });
@@ -745,6 +862,15 @@ async function route(req, res) {
         return await fn(client, a ? numericId(a.user.id) : 0, a);
       } finally { client.release(); }
     };
+
+    // 🚫 أي route إدمن: تحقق صريح من is_admin قبل أي حاجة
+    if (p.startsWith('/api/safety/admin/') && p !== '/api/safety/admin/is-admin') {
+      const allowed = await withUser(async (cl, uid) => {
+        const r = await cl.query('SELECT is_admin($1) a', [uid]);
+        return !!r.rows[0]?.a;
+      }).catch(() => false);
+      if (!allowed) return send(res, 403, { error: 'FORBIDDEN' });
+    }
 
     // إعدادات الأمان (خطوط المساعدة، الحدود...) — عام
     if (p === '/api/safety/config' && method === 'GET') {

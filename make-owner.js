@@ -3,6 +3,11 @@
 require('./lib/env');
 const { Client } = require('pg');
 const username = (process.argv[2] || '').trim();
+// يعمل محلياً فقط وبإذن صريح من env — مفيش أي route يوصل له
+if (process.env.NODE_ENV === 'production' || process.env.ALLOW_LOCAL_ADMIN !== '1') {
+  console.error('مسموح محلياً فقط: ALLOW_LOCAL_ADMIN=1 node make-owner.js <username>');
+  process.exit(1);
+}
 if (!username) { console.error('اكتب اسم المستخدم: node make-owner.js myname'); process.exit(1); }
 (async () => {
   const c = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });

@@ -19,6 +19,7 @@ async function call(path, data, token) {
   const check = async (name, fn) => { try { await fn(); console.log('✔', name); pass++; } catch (e) { console.log('✖', name, '::', e.message); fail++; } };
   try {
     await c.connect();
+    await c.query('TRUNCATE login_attempts, register_attempts');
     const u = 'secure_' + Math.random().toString(36).slice(2, 8);
 
     await check('username normalization', () => {

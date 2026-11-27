@@ -57,13 +57,15 @@ code{background:#222;padding:2px 6px;border-radius:5px;direction:ltr;display:inl
   </div>
 
   <p class="hint">
-    🔒 الباسورد مش محفوظ كنص على الجهاز أو في المتصفح — بيُخزّن مشفر في Supabase.<br>
+    🔒 الباسورد مش محفوظ كنص على الجهاز — بيُخزّن مشفر في Supabase.<br>
+    ⚠️ من غير إيميل مش هتقدر تستعيد حسابك لو نسيت الباسورد.<br>
     السيرفر لازم يكون شغال على <code>http://localhost:3000</code>.
   </p>
 </div>
 
-<script>
-const API = 'http://localhost:3000';
+<script type="module">
+import * as secure from './secure-storage.js';
+const API = location.origin;
 const $ = id => document.getElementById(id);
 const msg = (t, ok) => { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'err'; };
 
@@ -73,20 +75,17 @@ async function go(kind) {
   if (!username || !password) return msg('اكتب المستخدم والباسورد', false);
   msg('جاري الاتصال بالسيرفر...', true);
   try {
+    const deviceId = await secure.getDeviceId();
     const r = await fetch(API + '/api/auth/' + kind, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, deviceId }),
     });
     const d = await r.json();
     if (!r.ok || d.error) return msg(d.error || 'حصلت مشكلة', false);
-    if ($('remember').checked) {
-      localStorage.setItem('vibeToken', d.token);
-      localStorage.setItem('vibeUsername', username);
-    } else {
-      sessionStorage.setItem('vibeToken', d.token);
-      sessionStorage.setItem('vibeUsername', username);
-    }
+    const remember = $('remember').checked;
+    await secure.setToken(d.token, remember);
+    secure.setUsername(username, remember);
     msg(kind === 'register' ? '✅ تم إنشاء الحساب' : '✅ تم تسجيل الدخول', true);
     $('rUser').textContent = username;
     $('result').style.display = 'block';
@@ -96,7 +95,7 @@ async function go(kind) {
 }
 $('regBtn').onclick = () => go('register');
 $('loginBtn').onclick = () => go('login');
-$('user').value = localStorage.getItem('vibeUsername') || '';
+$('user').value = secure.getUsername() || '';
 </script>
 </body>
 </html>
