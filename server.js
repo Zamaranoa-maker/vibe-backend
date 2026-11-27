@@ -37,6 +37,27 @@ function phase0Block(res, feature) {
 const dbLayer = require('./lib/db');
 const authSecure = require('./lib/auth-secure');
 
+/* تحقق كامل من Google ID token (التوقيع + الجمهور + الانتهاء + البريد الموثّق) */
+async function verifyGoogleIdToken(idToken) {
+  const [h, p, s] = String(idToken).split('.');
+  if (!h || !p || !s) throw new Error('BAD_CREDENTIALS');
+  const header = JSON.parse(Buffer.from(h, 'base64url').toString('utf8'));
+  const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+  if (header.alg !== 'RS256' || !header.kid) throw new Error('BAD_CREDENTIALS');
+  if (payload.aud !== process.env.GOOGLE_CLIENT_ID) throw new Error('BAD_CREDENTIALS');
+  if (!['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)) throw new Error('BAD_CREDENTIALS');
+  if (Number(payload.exp) * 1000 <= Date.now()) throw new Error('BAD_CREDENTIALS');
+  if (payload.email_verified !== true) throw new Error('BAD_CREDENTIALS');
+  const cr = await fetch('https://www.googleapis.com/oauth2/v3/certs');
+  if (!cr.ok) throw new Error('BAD_CREDENTIALS');
+  const jwk = (await cr.json()).keys.find(k => k.kid === header.kid);
+  if (!jwk) throw new Error('BAD_CREDENTIALS');
+  const key = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+  const sig = Buffer.from(s, 'base64url');
+  if (!crypto.createVerify('RSA-SHA256').update(h + '.' + p).verify(key, sig)) throw new Error('BAD_CREDENTIALS');
+  return payload;   // الإيميل من التوكن الموثّق فقط، مش من العميل
+}
+
 /* ---------- يوزر + باسورد: lib/auth-secure.js ---------- */
 const walletDB = require('./lib/wallet-db');
 const billing = require('./lib/billing');
@@ -286,10 +307,7 @@ async function route(req, res) {
     try {
       if (!process.env.GOOGLE_CLIENT_ID) throw new Error('GOOGLE_NOT_CONFIGURED');
       if (!b.idToken) throw new Error('BAD_CREDENTIALS');
-      const vr = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(b.idToken));
-      const info = await vr.json();
-      if (!vr.ok || info.aud !== process.env.GOOGLE_CLIENT_ID || !info.email_verified)
-        throw new Error('BAD_CREDENTIALS');
+      const info = await verifyGoogleIdToken(b.idToken);
       const pool = dbLayer.getPool();
       const ext = 'google_' + info.sub;
       let row = await pool.query('SELECT id,external_id,status FROM users WHERE external_id=$1', [ext]);
@@ -540,6 +558,10 @@ async function route(req, res) {
       list = out;
     } else {
       list.sort((x,y)=>y.createdAt-x.createdAt);
+    }
+    if (u.searchParams.has('page')) {
+      const pg = Math.max(0, parseInt(u.searchParams.get('page') || '0')), size = 12;
+      list = list.slice(pg * size, (pg + 1) * size);
     }
     return send(res, 200, { videos: list.map(v => publicVideo(v)) });
   }
@@ -965,8 +987,9 @@ async function route(req, res) {
 
     // بوابة العمر
     if (p === '/api/safety/birthdate' && method === 'POST') {
-      const b = await body(req);
       const acc = await auth(req, db);
+      if (!acc) return send(res, 401, { error: 'unauthorized' });
+      const b = await body(req);
       try {
         let realUid = 0;
         if (acc) {
@@ -998,6 +1021,7 @@ async function route(req, res) {
 
     // بلاغ
     if (p === '/api/safety/report' && method === 'POST') {
+      if (!(await auth(req, db))) return send(res, 401, { error: 'unauthorized' });
       const b = await body(req);
       try {
         const id = await withUser((cl, uid) => cl.query(
@@ -1391,6 +1415,28 @@ async function route(req, res) {
     const b = await body(req);
     const r = safety.checkText(b.text);
     return send(res, 200, r);
+  }
+
+  // حذف الحساب بطلب صريح من صاحبه
+  if (p === '/api/me/delete' && method === 'POST') {
+    const a = await auth(req, db); if (!a) return send(res, 401, { error: 'unauthorized' });
+    const b = await body(req);
+    if (String(b.confirm || '') !== 'DELETE') return send(res, 400, { error: 'تأكيد مطلوب' });
+    try {
+      const ext = String(a.user.id);
+      if (dbLayer.available) {
+        const pool = dbLayer.getPool();
+        const me = await pool.query('SELECT id FROM users WHERE external_id=$1', [ext]);
+        if (me.rows[0]) {
+          await authSecure.revokeAllSessions(pool, me.rows[0].id);
+          await pool.query(`UPDATE profiles SET status='banned',ban_reason='deleted_by_user' WHERE id=$1`, [me.rows[0].id]);
+          await pool.query(`UPDATE users SET status='deleted' WHERE id=$1`, [me.rows[0].id]);
+        }
+      }
+      for (const [t, v] of Object.entries(db.users)) if (v.id === ext) delete db.users[t];
+      store.commit();
+      return send(res, 200, { ok: true });
+    } catch (e) { return send(res, 400, { error: e.message }); }
   }
 
   // 🚨 بلاغ عام (فيديو/تعليق/صوتي/بروفايل/لايف/رسالة) بأولوية طفل
