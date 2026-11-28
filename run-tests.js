@@ -20,6 +20,7 @@ const env = {
 };
 
 const tests = [
+  'test-test-env.js',   // بوابة الفصل بين الاختبار والإنتاج
   'test-guest.js',
   'test-auth-hardening.js',
   'test-auth-secure.js',

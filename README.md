@@ -21,7 +21,7 @@ TEST_DATABASE_URL=<قاعدة اختبار منفصلة — مشروع Supabase 
 npm test
 ```
 `run-tests.js` بيعمل الآتي قبل أي اختبار:
-- يرفض التشغيل لو `TEST_DATABASE_URL` ناقص، أو مساوي لـ `DATABASE_URL`، أو نفسه **host** (حتى لو الباسورد مختلف).
+- يرفض التشغيل لو `TEST_DATABASE_URL` ناقص، أو مساوي لـ `DATABASE_URL`، أو نفسه **host**، أو نفسه **Supabase project ref** (`postgres.<ref>` أو `db.<ref>.supabase.co`) — حتى لو الباسورد أو الـ host مختلف. كمان بيرفض لو أي ref مش قابل للاستخراج.
 - يطبّق الـ migrations على قاعدة الاختبار فقط.
 - يقلّب سيرفر اختبار على `TEST_PORT` (افتراضي 3100) بـ `DATABASE_URL=TEST_DATABASE_URL`.
 - بيشغّل كل ملفات `test-*.js`، وبعدين ينظّف قاعدة الاختبار (`cleanup-test-db.js`).
