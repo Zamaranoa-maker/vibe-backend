@@ -1,4 +1,4 @@
-const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3116);
+﻿const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3100);
 (async () => {
   let pass = 0, fail = 0;
   const check = (n, ok, x = '') => { ok ? (console.log('✔', n), pass++) : (console.log('✖', n, x), fail++); };

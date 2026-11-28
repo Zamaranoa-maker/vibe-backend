@@ -1,4 +1,4 @@
-/* اختبارات اقتصاد العملات والهدايا */
+﻿/* اختبارات اقتصاد العملات والهدايا */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const E = require('./lib/economy');

@@ -1,8 +1,8 @@
-require('./lib/env');
+﻿require('./lib/test-env');
 const { Client } = require('pg');
 const assert = require('node:assert/strict');
 const authSecure = require('./lib/auth-secure');
-const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3000);
+const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3100);
 
 async function call(path, data, token) {
   const r = await fetch(BASE + path, {

@@ -10,6 +10,28 @@ node server.js
 - API: http://localhost:3000/api/health
 - لوحة التحكم: http://localhost:3000/admin
 
+## الاختبارات ( فصل الإنتاج عن الاختبار )
+الاختبارات **ما بتشتغلش على قاعدة الإنتاج أبداً**. لازم تحط في `.env`:
+```
+DATABASE_URL=<قاعدة الإنتاج>
+TEST_DATABASE_URL=<قاعدة اختبار منفصلة — مشروع Supabase تاني>
+```
+بعدين:
+```
+npm test
+```
+`run-tests.js` بيعمل الآتي قبل أي اختبار:
+- يرفض التشغيل لو `TEST_DATABASE_URL` ناقص، أو مساوي لـ `DATABASE_URL`، أو نفسه **host** (حتى لو الباسورد مختلف).
+- يطبّق الـ migrations على قاعدة الاختبار فقط.
+- يقلّب سيرفر اختبار على `TEST_PORT` (افتراضي 3100) بـ `DATABASE_URL=TEST_DATABASE_URL`.
+- بيشغّل كل ملفات `test-*.js`، وبعدين ينظّف قاعدة الاختبار (`cleanup-test-db.js`).
+
+مفيش اختبار يقدر ينشئ أدمن في أي قاعدة غير قاعدة الاختبار، و`make-owner.js` محلي فقط بـ `ALLOW_LOCAL_ADMIN=1`.
+
+## الصحة والإحصائيات
+- `GET /api/health` بيرجع `{"ok":true}` بس — مفيش أي عدّادات أو بيانات داخلية.
+- الإحصائيات كلها خلف `GET /api/admin/stats` (لأدمن بس).
+
 ## الأمان المطبّق
 - ✅ Rate limiting (150 طلب/دقيقة لكل IP)
 - ✅ CORS مقيّد (localhost + file فقط — يمنع المواقع الخبيثة)

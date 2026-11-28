@@ -1,8 +1,8 @@
-require('./lib/env');
+﻿require('./lib/test-env');
 const fs = require('fs');
 const path = require('path');
 const assert = require('node:assert/strict');
-const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3000);
+const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3100);
 
 async function call(pathname, method = 'GET', data, token) {
   const r = await fetch(BASE + pathname, {

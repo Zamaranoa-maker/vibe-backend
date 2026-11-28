@@ -1,4 +1,4 @@
-require('./lib/env');
+﻿require('./lib/test-env');
 const { Client } = require('pg');
 const dbLayer = require('./lib/db');
 const { sendGift, withTx } = require('./lib/wallet-db');

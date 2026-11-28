@@ -1,4 +1,4 @@
-require('./lib/env');
+﻿require('./lib/test-env');
 const { Client } = require('pg');
 const assert = require('node:assert/strict');
 

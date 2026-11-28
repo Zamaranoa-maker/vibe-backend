@@ -1,5 +1,5 @@
-/* اختبار نقاط الأمان على السيرفر المحلي (PORT=3111) */
-const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3111);
+﻿/* اختبار نقاط الأمان على السيرفر المحلي (PORT=3111) */
+const BASE = 'http://localhost:' + (process.env.TEST_PORT || 3100);
 let token = '';
 async function call(path, method = 'GET', data) {
   const r = await fetch(BASE + path, {

@@ -1,4 +1,4 @@
-/* اختبارات منطق الاقتصاد — تعمل بدون Postgres حقيقي (منطق فقط) */
+﻿/* اختبارات منطق الاقتصاد — تعمل بدون Postgres حقيقي (منطق فقط) */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const E = require('./lib/economy');

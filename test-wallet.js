@@ -1,4 +1,4 @@
-/* اختبارات منطق المحفظة والـ ledger */
+﻿/* اختبارات منطق المحفظة والـ ledger */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ageOf, WalletError } = require('./lib/wallet-db');

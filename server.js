@@ -189,7 +189,7 @@ async function route(req, res) {
 
   // Health
   if (p === '/api/health' && method === 'GET') {
-    return send(res, 200, { ok: true, users: Object.keys(db.users).length, videos: Object.keys(db.videos).length });
+    return send(res, 200, { ok: true });   // مفيش أي بيانات داخلية
   }
 
   // تسجيل/دخول جهاز
@@ -1687,8 +1687,15 @@ async function route(req, res) {
     store.commit(); return send(res, 200, { ok:true });
   }
 
-  // إحصائيات الأدمن
+  // إحصائيات الأدمن — super/moderator فقط
   if (p === '/api/admin/stats' && method === 'GET') {
+    const a = await auth(req, db);
+    if (!a) return send(res, 401, { error: 'unauthorized' });
+    if (dbLayer.available) {
+      const ok = await dbLayer.getPool().query('SELECT is_admin($1) a', [numericId(a.user.id)])
+        .then(r => !!r.rows[0]?.a).catch(() => false);
+      if (!ok) return send(res, 403, { error: 'FORBIDDEN' });
+    }
     return send(res, 200, {
       stats: db.stats,
       config: db.config,

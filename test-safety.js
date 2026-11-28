@@ -1,4 +1,4 @@
-/* اختبارات وحدة لنظام الأمان — node --test */
+﻿/* اختبارات وحدة لنظام الأمان — node --test */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const S = require('./lib/safety');
